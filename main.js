@@ -49,6 +49,7 @@ const DEFAULT_CONFIG = {
   language: 'cpp',
   mode: 'coding',
   selectedModel: 'gemini:gemini-3.5-flash-lite',
+  contentProtection: true,
 };
 
 const TRANSCRIPT_RETENTION_MS = 3 * 60 * 1000; // Rolling ~3 minutes displayed
@@ -197,6 +198,10 @@ function loadConfig() {
             ? parsed.mode
             : DEFAULT_CONFIG.mode,
         selectedModel: validSelected,
+        contentProtection:
+          typeof parsed.contentProtection === 'boolean'
+            ? parsed.contentProtection
+            : DEFAULT_CONFIG.contentProtection,
       };
     }
   } catch (err) {
@@ -237,11 +242,17 @@ function updateConfig(patch) {
       next.selectedModel = requested;
     }
   }
+  if (typeof patch.contentProtection === 'boolean') {
+    next.contentProtection = patch.contentProtection;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setContentProtection(next.contentProtection);
+    }
+  }
   appConfig = next;
   saveConfig(appConfig);
   const active = getActiveModel();
   console.log(
-    `[Config] Updated -> mode=${appConfig.mode}, language=${appConfig.language}, model=${active.provider}:${active.model} (vision=${active.supportsVision})`
+    `[Config] Updated -> mode=${appConfig.mode}, language=${appConfig.language}, model=${active.provider}:${active.model} (vision=${active.supportsVision}), contentProtection=${appConfig.contentProtection}`
   );
   sendToRenderer('config:update', getConfigPayload());
   return getConfigPayload();
@@ -417,6 +428,10 @@ function createWindow() {
   // Stay visible over other apps (including fullscreen apps) and across all macOS Spaces.
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  // Best-effort screen-capture protection (configurable via config.json `contentProtection`).
+  mainWindow.setContentProtection(Boolean(appConfig.contentProtection));
+  console.log(`[Window] setContentProtection(${Boolean(appConfig.contentProtection)})`);
 
   mainWindow.loadFile(path.join(__dirname, 'renderer.html'));
 

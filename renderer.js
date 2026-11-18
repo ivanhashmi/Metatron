@@ -24,6 +24,7 @@ const chatScroll = document.getElementById('chat-scroll');
 const chatThread = document.getElementById('chat-thread');
 const transcriptList = document.getElementById('transcript-list');
 const transcriptScroll = document.getElementById('transcript-scroll');
+const transcribingIndicator = document.getElementById('transcribing-indicator');
 const followupForm = document.getElementById('followup-form');
 const followupInput = document.getElementById('followup-input');
 
@@ -45,6 +46,10 @@ let activeAssistantRawText = '';
 
 function hasActiveCapture() {
   return Boolean(captures.me || captures.them);
+}
+
+function updateTranscribingIndicator() {
+  transcribingIndicator.classList.toggle('active', hasActiveCapture());
 }
 
 function setStatus(state, label) {
@@ -432,9 +437,13 @@ async function createCapturePipeline(source, mediaStream) {
 
 async function teardownCapture(source) {
   const pipeline = captures[source];
-  if (!pipeline) return;
+  if (!pipeline) {
+    updateTranscribingIndicator();
+    return;
+  }
   captures[source] = null;
   pipeline.active = false;
+  updateTranscribingIndicator();
 
   if (pipeline.workletNode) {
     pipeline.workletNode.port.onmessage = null;
@@ -483,6 +492,7 @@ async function startMicCapture() {
     });
 
     captures.me = await createCapturePipeline('me', stream);
+    updateTranscribingIndicator();
   } catch (error) {
     await teardownCapture('me');
     const msg =
@@ -527,6 +537,7 @@ async function startSystemAudioCapture() {
     });
 
     captures.them = await createCapturePipeline('them', audioOnlyStream);
+    updateTranscribingIndicator();
   } catch (error) {
     await teardownCapture('them');
     const msg =

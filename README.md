@@ -59,7 +59,13 @@ A minimal macOS meeting & coding assistant overlay built with Electron, Deepgram
    DEEPGRAM_API_KEY=your_real_deepgram_key
    ```
 
-3. *(Optional)* Edit `models.json` to add/remove/reorder Gemini or Groq models without touching code, or customize `config.json` (`language`, `mode`, `selectedModel`).
+3. *(Optional)* Edit `models.json` to add/remove/reorder Gemini or Groq models without touching code, or customize `config.json` (`language`, `mode`, `selectedModel`, `contentProtection`).
+
+## Screen Sharing & Content Protection
+
+- Metatron calls `mainWindow.setContentProtection(true)` by default (controlled via `"contentProtection": true` in `config.json`; set it to `false` to disable).
+- **Note:** `setContentProtection` is **best-effort on macOS** — whether an overlay is hidden from a full-screen capture depends on the macOS version and the screen-sharing app's capture API. Sharing a **single application window or browser tab** (rather than your entire desktop) is the reliable way to keep the overlay off a screen share.
+- Whenever microphone or system audio capture is active, a small pulsing **Transcribing** indicator is shown in the overlay's Live Transcript header.
 
 ## Run
 
@@ -72,7 +78,7 @@ npm start
 - `main.js` — Electron main process, `models.json` & `config.json` management, overlay window, global shortcuts, macOS permissions, screen capture, multi-turn history, transcript buffer, and IPC.
 - `llm.js` — Multi-provider LLM interface with `gemini` (`contents/parts`) and `groq` (OpenAI-compatible SSE `messages` + base64 data URL images), error normalization, and latency logging.
 - `models.json` — Editable model catalog (`provider`, `model`, `label`, `supportsVision`, `maxOutputTokens`).
-- `config.json` — Persistent user preferences (`language`, `mode`, `selectedModel`).
+- `config.json` — Persistent user preferences (`language`, `mode`, `selectedModel`, `contentProtection`).
 - `stt.js` — Isolated Deepgram `nova-3` streaming WebSocket provider per source (`me`, `them`).
 - `preload.js` — Secure `contextBridge` API (`contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`).
 - `renderer.html` & `renderer.js` — Model switcher bar/dropdown, chat thread with monospace code blocks + Copy button, screenshot bar, follow-up input, and dual `AudioWorklet` capture.

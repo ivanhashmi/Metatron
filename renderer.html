@@ -482,6 +482,33 @@
         color: rgba(244, 246, 250, 0.92);
       }
 
+      .transcribing-indicator {
+        display: none;
+        align-items: center;
+        gap: 5px;
+        padding: 1.5px 6px;
+        border-radius: 999px;
+        background: rgba(239, 68, 68, 0.18);
+        border: 1px solid rgba(248, 113, 113, 0.42);
+        color: #fecaca;
+        font-size: 9.5px;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        user-select: none;
+      }
+
+      .transcribing-indicator.active {
+        display: inline-flex;
+      }
+
+      .transcribing-dot {
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: #ef4444;
+        animation: pulse 1s infinite ease-in-out;
+      }
+
       .scroll-area {
         flex: 1;
         min-height: 0;
@@ -885,6 +912,10 @@
         <section class="section section-transcript">
           <div class="section-header">
             <span class="section-label">Live Transcript (last 3 min)</span>
+            <span id="transcribing-indicator" class="transcribing-indicator" aria-live="polite">
+              <span class="transcribing-dot"></span>
+              <span>Transcribing</span>
+            </span>
           </div>
           <div id="transcript-scroll" class="scroll-area">
             <div id="transcript-list" class="transcript-list">

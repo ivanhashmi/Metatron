@@ -1,5 +1,6 @@
 {
   "language": "cpp",
   "mode": "coding",
-  "selectedModel": "gemini:gemini-3.5-flash-lite"
+  "selectedModel": "gemini:gemini-3.5-flash-lite",
+  "contentProtection": true
 }
