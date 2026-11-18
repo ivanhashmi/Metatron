@@ -17,14 +17,18 @@ const LOG_EVERY_N_FRAMES = 25; // ~2.5s at 100ms chunks
 
 /**
  * Deepgram Nova-3 streaming speech-to-text provider.
- * To swap providers later (e.g. AssemblyAI, Groq/Whisper), implement an object
- * with `createSession({ onStatus, onTranscript, onError })` returning
- * `{ start(), sendAudio(buffer, rms), stop() }` and change `activeProvider` below.
+ * Each call to `createSession({ source, onStatus, onTranscript, onError })`
+ * manages its own independent WebSocket connection, keepalive loop, and
+ * exponential-backoff reconnect cycle for that audio source ("me" or "them").
+ *
+ * To swap providers later, implement the same `createSession` interface and
+ * change `activeProvider` below.
  */
 const deepgramProvider = {
   name: 'deepgram',
 
-  createSession({ onStatus, onTranscript, onError } = {}) {
+  createSession({ source = 'me', onStatus, onTranscript, onError } = {}) {
+    const tag = `[STT:${source}]`;
     let ws = null;
     let active = false;
     let reconnectTimer = null;
@@ -35,15 +39,17 @@ const deepgramProvider = {
     let lastSpeechDetectedAt = 0;
 
     const emitStatus = (state) => {
-      if (typeof onStatus === 'function') onStatus(state);
+      if (typeof onStatus === 'function') onStatus(state, source);
     };
 
     const emitTranscript = (payload) => {
-      if (typeof onTranscript === 'function') onTranscript(payload);
+      if (typeof onTranscript === 'function') {
+        onTranscript({ ...payload, source });
+      }
     };
 
     const emitError = (message) => {
-      if (typeof onError === 'function') onError(message);
+      if (typeof onError === 'function') onError(message, source);
     };
 
     function clearTimers() {
@@ -67,9 +73,9 @@ const deepgramProvider = {
         if (isSilent || isIdle) {
           try {
             ws.send(JSON.stringify({ type: 'KeepAlive' }));
-            console.log('[STT] Sent Deepgram KeepAlive (silence/idle)');
+            console.log(`${tag} Sent Deepgram KeepAlive (silence/idle)`);
           } catch (err) {
-            console.warn('[STT] Failed to send KeepAlive:', err.message);
+            console.warn(`${tag} Failed to send KeepAlive:`, err.message);
           }
         }
       }, KEEPALIVE_INTERVAL_MS);
@@ -81,7 +87,7 @@ const deepgramProvider = {
       emitStatus('reconnecting');
       const delay = reconnectDelay;
       reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
-      console.log(`[STT] Reconnecting to Deepgram in ${delay}ms (${reason})...`);
+      console.log(`${tag} Reconnecting to Deepgram in ${delay}ms (${reason})...`);
       reconnectTimer = setTimeout(() => {
         if (active) connect();
       }, delay);
@@ -99,7 +105,7 @@ const deepgramProvider = {
       }
 
       emitStatus(reconnectDelay > INITIAL_RECONNECT_DELAY_MS ? 'reconnecting' : 'connecting');
-      console.log('[STT] Connecting to Deepgram streaming API (model=nova-3)...');
+      console.log(`${tag} Connecting to Deepgram streaming API (model=nova-3)...`);
 
       let fatalAuthError = false;
       const socket = new WebSocket(DEEPGRAM_WS_URL, {
@@ -118,7 +124,7 @@ const deepgramProvider = {
         framesSent = 0;
         lastAudioSentAt = Date.now();
         lastSpeechDetectedAt = Date.now();
-        console.log('[STT] Connected to Deepgram WebSocket');
+        console.log(`${tag} Connected to Deepgram WebSocket`);
         emitStatus('listening');
         startKeepAlive();
       });
@@ -129,7 +135,7 @@ const deepgramProvider = {
         try {
           data = JSON.parse(raw.toString());
         } catch (err) {
-          console.warn('[STT] Non-JSON message from Deepgram:', err.message);
+          console.warn(`${tag} Non-JSON message from Deepgram:`, err.message);
           return;
         }
 
@@ -143,9 +149,7 @@ const deepgramProvider = {
           const speechFinal = Boolean(data.speech_final);
 
           if (text) {
-            console.log(
-              `[STT] Deepgram ${isFinal ? 'FINAL' : 'INTERIM'}: "${text}"`
-            );
+            console.log(`${tag} Deepgram ${isFinal ? 'FINAL' : 'INTERIM'}: "${text}"`);
           }
 
           emitTranscript({
@@ -155,19 +159,17 @@ const deepgramProvider = {
             timestamp: Date.now(),
           });
         } else if (data.type === 'Metadata') {
-          console.log(
-            `[STT] Deepgram Metadata received (request_id=${data.request_id || 'n/a'})`
-          );
+          console.log(`${tag} Deepgram Metadata received (request_id=${data.request_id || 'n/a'})`);
         } else if (data.type === 'Error' || data.err_code) {
           const msg = data.description || data.message || data.err_msg || 'Deepgram stream error';
-          console.error('[STT] Deepgram error message:', msg);
-          emitError(`Deepgram error: ${msg}`);
+          console.error(`${tag} Deepgram error message:`, msg);
+          emitError(`Deepgram (${source}) error: ${msg}`);
         }
       });
 
       socket.on('unexpected-response', (_req, res) => {
         const statusCode = res && res.statusCode;
-        console.error(`[STT] Deepgram unexpected HTTP response: ${statusCode}`);
+        console.error(`${tag} Deepgram unexpected HTTP response: ${statusCode}`);
         if (statusCode === 401 || statusCode === 403) {
           fatalAuthError = true;
           active = false;
@@ -181,16 +183,16 @@ const deepgramProvider = {
 
       socket.on('error', (err) => {
         if (ws !== socket) return;
-        console.error('[STT] Deepgram WebSocket error:', err.message);
+        console.error(`${tag} Deepgram WebSocket error:`, err.message);
         if (!fatalAuthError && !active) {
-          emitError(`Deepgram connection error: ${err.message}`);
+          emitError(`Deepgram (${source}) connection error: ${err.message}`);
         }
       });
 
       socket.on('close', (code, reasonBuf) => {
         if (ws !== socket) return;
         const reason = reasonBuf ? reasonBuf.toString() : '';
-        console.log(`[STT] Deepgram WebSocket closed (code=${code}, reason="${reason}")`);
+        console.log(`${tag} Deepgram WebSocket closed (code=${code}, reason="${reason}")`);
         ws = null;
         if (keepAliveTimer) {
           clearInterval(keepAliveTimer);
@@ -206,6 +208,8 @@ const deepgramProvider = {
     }
 
     return {
+      source,
+
       start() {
         if (active) return true;
         const apiKey = (process.env.DEEPGRAM_API_KEY || '').trim();
@@ -236,12 +240,12 @@ const deepgramProvider = {
           }
           if (framesSent === 1 || framesSent % LOG_EVERY_N_FRAMES === 0) {
             console.log(
-              `[STT] Sent audio frame #${framesSent} (${pcmBuffer.byteLength} bytes, rms=${rms.toFixed(4)})`
+              `${tag} Sent audio frame #${framesSent} (${pcmBuffer.byteLength} bytes, rms=${rms.toFixed(4)})`
             );
           }
           return true;
         } catch (err) {
-          console.error('[STT] Failed to send audio frame:', err.message);
+          console.error(`${tag} Failed to send audio frame:`, err.message);
           return false;
         }
       },
@@ -260,9 +264,9 @@ const deepgramProvider = {
           if (socket.readyState === WebSocket.OPEN) {
             try {
               socket.send(JSON.stringify({ type: 'CloseStream' }));
-              console.log('[STT] Sent Deepgram CloseStream');
+              console.log(`${tag} Sent Deepgram CloseStream`);
             } catch (err) {
-              console.warn('[STT] Failed to send CloseStream:', err.message);
+              console.warn(`${tag} Failed to send CloseStream:`, err.message);
             }
             setTimeout(() => {
               if (
@@ -278,7 +282,7 @@ const deepgramProvider = {
         }
 
         emitStatus('stopped');
-        console.log('[STT] Transcription stopped');
+        console.log(`${tag} Transcription stopped`);
       },
     };
   },

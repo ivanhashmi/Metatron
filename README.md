@@ -2,22 +2,24 @@
 
 A minimal macOS meeting assistant overlay built with Electron, Deepgram (`nova-3`), and the Gemini API.
 
-## Features (Steps 1–3)
+## Features (Steps 1–4)
 
 - Frameless, transparent, dark rounded always-on-top overlay that stays visible over other apps and across macOS Spaces.
-- Live microphone transcription via `getUserMedia` + `AudioWorklet` (16-bit PCM @ 16 kHz mono) streamed over IPC to Deepgram's `nova-3` WebSocket API with `interim_results` and `smart_format`.
-- Graceful WebSocket reconnection and automatic `KeepAlive` messages during silence.
-- Rolling ~3-minute timestamped transcript buffer in the overlay (lighter italic interim lines, normal finalized lines, auto-scrolling).
+- Dual-stream live transcription:
+  - **Me** (microphone via `getUserMedia` + dedicated `AudioWorklet`, 16-bit PCM @ 16 kHz mono)
+  - **Them** (system audio loopback via `setDisplayMediaRequestHandler` + `getDisplayMedia` with video track discarded + dedicated `AudioWorklet`, 16-bit PCM @ 16 kHz mono)
+- Separate Deepgram `nova-3` WebSocket connections per source (`me` and `them`), each with independent `KeepAlive` during silence and exponential-backoff reconnection.
+- Rolling ~3-minute timestamped transcript merged chronologically with color-coded **Me** and **Them** labels (lighter italic interim lines, normal finalized lines, auto-scrolling).
 - Global shortcuts:
   - `Cmd+Shift+Space`: Toggle showing/hiding the overlay.
-  - `Cmd+Shift+T`: Start/stop live microphone transcription (with listening status indicator in the overlay).
-  - `Cmd+Enter`: Send the last ~2 minutes of rolling transcript as `context` to Gemini and stream a 1–2 sentence suggested reply into the overlay.
+  - `Cmd+Shift+T`: Start/stop both microphone and system audio transcription together.
+  - `Cmd+Enter`: Send the last ~2 minutes of labeled (`Me` / `Them`) transcript as `context` to Gemini and stream a 1–2 sentence suggested reply into the overlay.
 - Isolated provider modules: `llm.js` (Gemini) and `stt.js` (Deepgram).
 - Secure Electron setup (`contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, minimal `preload.js` IPC bridge).
 
 ## Prerequisites
 
-- macOS (Microphone permission granted to your terminal / Electron)
+- macOS 13+ (Microphone and **Screen & System Audio Recording** permissions granted to Electron / your terminal app)
 - Node.js 20+ and npm
 - A Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
 - A Deepgram API key from [Deepgram Console](https://console.deepgram.com/)
@@ -53,11 +55,11 @@ npm start
 
 ## Project Structure
 
-- `main.js` — Electron main process, overlay window config, global shortcuts, macOS mic permission handling, rolling transcript buffer, and IPC wiring.
+- `main.js` — Electron main process, overlay window config, global shortcuts, macOS Microphone & Screen Recording permission checks, `setDisplayMediaRequestHandler` (`audio: 'loopback'`), merged rolling transcript buffer, and IPC wiring.
 - `preload.js` — Secure `contextBridge` API exposed to the renderer as `window.metatron`.
-- `renderer.html` — Frameless dark translucent overlay layout and styles.
-- `renderer.js` — Renderer UI logic, `getUserMedia` + `AudioWorklet` capture, and streaming display.
-- `audio-processor.js` — `AudioWorkletProcessor` that resamples mic input to 16 kHz mono 16-bit PCM.
-- `stt.js` — Isolated speech-to-text provider module (Deepgram `nova-3` WebSocket streaming, keepalive, reconnect).
+- `renderer.html` — Frameless dark translucent overlay layout and styles (color-coded `Me` and `Them` transcript lines).
+- `renderer.js` — Dual `AudioWorklet` capture pipelines (`me` mic + `them` system audio loopback) and overlay UI logic.
+- `audio-processor.js` — `AudioWorkletProcessor` that mixes to mono and resamples audio to 16 kHz 16-bit PCM.
+- `stt.js` — Isolated speech-to-text provider module (independent Deepgram `nova-3` WebSocket session per source).
 - `llm.js` — Isolated LLM provider module (Gemini via `@google/genai`).
 - `.env.example` — Template for required environment variables (`.env` is gitignored).

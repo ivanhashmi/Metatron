@@ -10,28 +10,37 @@ const errorBox = document.getElementById('error-box');
 const askBtn = document.getElementById('ask-btn');
 const hideBtn = document.getElementById('hide-btn');
 
-let mediaStream = null;
-let audioContext = null;
-let sourceNode = null;
-let workletNode = null;
-let silentGain = null;
-let captureActive = false;
+const captures = {
+  me: null,
+  them: null,
+};
+
+function hasActiveCapture() {
+  return Boolean(captures.me || captures.them);
+}
 
 function setStatus(state, label) {
   statusDot.className = 'status-dot' + (state ? ` ${state}` : '');
   statusText.textContent = label;
 }
 
-function setListeningIndicator(state) {
-  listenPill.className = 'listen-pill' + (state && state !== 'stopped' ? ` ${state}` : '');
-  if (state === 'listening') {
-    listenLabel.textContent = 'Listening';
-  } else if (state === 'connecting') {
+function setListeningIndicator(status) {
+  const overall = status && status.overall ? status.overall : 'stopped';
+  const sources = (status && status.sources) || {};
+  listenPill.className = 'listen-pill' + (overall !== 'stopped' ? ` ${overall}` : '');
+
+  if (overall === 'listening') {
+    const activeLabels = [];
+    if (sources.me === 'listening') activeLabels.push('Me');
+    if (sources.them === 'listening') activeLabels.push('Them');
+    listenLabel.textContent =
+      activeLabels.length > 0 ? `Listening (${activeLabels.join(' + ')})` : 'Listening';
+  } else if (overall === 'connecting') {
     listenLabel.textContent = 'Connecting…';
-  } else if (state === 'reconnecting') {
+  } else if (overall === 'reconnecting') {
     listenLabel.textContent = 'Reconnecting…';
   } else {
-    listenLabel.textContent = 'Mic off';
+    listenLabel.textContent = 'Off';
   }
 }
 
@@ -49,54 +58,132 @@ function scrollToBottom(el) {
   el.scrollTop = el.scrollHeight;
 }
 
-function renderTranscript({ entries = [], interim = null }) {
+function createTranscriptRow(item, isInterim) {
+  const source = item.source === 'them' ? 'them' : 'me';
+  const line = document.createElement('div');
+  line.className = `transcript-line source-${source}` + (isInterim ? ' interim' : '');
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'transcript-time';
+  timeSpan.textContent = item.time;
+
+  const speakerSpan = document.createElement('span');
+  speakerSpan.className = `speaker-tag ${source}`;
+  speakerSpan.textContent = `${item.label || (source === 'them' ? 'Them' : 'Me')}:`;
+
+  line.appendChild(timeSpan);
+  line.appendChild(speakerSpan);
+  line.appendChild(document.createTextNode(item.text));
+  return line;
+}
+
+function renderTranscript({ entries = [], interims = [] }) {
   transcriptList.textContent = '';
 
-  if (entries.length === 0 && (!interim || !interim.text)) {
+  if (entries.length === 0 && interims.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'transcript-empty';
-    empty.textContent = captureActive
-      ? 'Listening… speak into your microphone.'
+    empty.textContent = hasActiveCapture()
+      ? 'Listening… speak into your mic or play call audio.'
       : 'Not listening yet. Press ⌘⇧T to start.';
     transcriptList.appendChild(empty);
     return;
   }
 
   for (const entry of entries) {
-    const line = document.createElement('div');
-    line.className = 'transcript-line';
-
-    const timeSpan = document.createElement('span');
-    timeSpan.className = 'transcript-time';
-    timeSpan.textContent = entry.time;
-
-    line.appendChild(timeSpan);
-    line.appendChild(document.createTextNode(entry.text));
-    transcriptList.appendChild(line);
+    transcriptList.appendChild(createTranscriptRow(entry, false));
   }
 
-  if (interim && interim.text) {
-    const interimLine = document.createElement('div');
-    interimLine.className = 'transcript-line interim';
-
-    const timeSpan = document.createElement('span');
-    timeSpan.className = 'transcript-time';
-    timeSpan.textContent = interim.time;
-
-    interimLine.appendChild(timeSpan);
-    interimLine.appendChild(document.createTextNode(interim.text));
-    transcriptList.appendChild(interimLine);
+  for (const interim of interims) {
+    if (interim && interim.text) {
+      transcriptList.appendChild(createTranscriptRow(interim, true));
+    }
   }
 
   scrollToBottom(transcriptScroll);
 }
 
+async function createCapturePipeline(source, mediaStream) {
+  const audioContext = new AudioContext();
+  await audioContext.audioWorklet.addModule('./audio-processor.js');
+
+  const sourceNode = audioContext.createMediaStreamSource(mediaStream);
+  const workletNode = new AudioWorkletNode(audioContext, 'pcm-16k-processor');
+  const silentGain = audioContext.createGain();
+  silentGain.gain.value = 0;
+
+  const pipeline = {
+    source,
+    mediaStream,
+    audioContext,
+    sourceNode,
+    workletNode,
+    silentGain,
+    active: true,
+  };
+
+  workletNode.port.onmessage = (event) => {
+    if (!pipeline.active || !event.data || !event.data.pcm) return;
+    window.metatron.sendAudioChunk(source, new Uint8Array(event.data.pcm), event.data.rms || 0);
+  };
+
+  sourceNode.connect(workletNode);
+  workletNode.connect(silentGain);
+  silentGain.connect(audioContext.destination);
+
+  if (audioContext.state === 'suspended') {
+    await audioContext.resume();
+  }
+
+  console.log(
+    `[Audio:${source}] Capturing at ${audioContext.sampleRate} Hz -> resampling to 16000 Hz mono 16-bit PCM`
+  );
+  return pipeline;
+}
+
+async function teardownCapture(source) {
+  const pipeline = captures[source];
+  if (!pipeline) return;
+  captures[source] = null;
+  pipeline.active = false;
+
+  if (pipeline.workletNode) {
+    pipeline.workletNode.port.onmessage = null;
+    try {
+      pipeline.workletNode.disconnect();
+    } catch {}
+  }
+
+  if (pipeline.sourceNode) {
+    try {
+      pipeline.sourceNode.disconnect();
+    } catch {}
+  }
+
+  if (pipeline.silentGain) {
+    try {
+      pipeline.silentGain.disconnect();
+    } catch {}
+  }
+
+  if (pipeline.mediaStream) {
+    for (const track of pipeline.mediaStream.getTracks()) {
+      track.stop();
+    }
+  }
+
+  if (pipeline.audioContext) {
+    try {
+      await pipeline.audioContext.close();
+    } catch {}
+  }
+}
+
 async function startMicCapture() {
-  if (captureActive) return;
-  clearError();
+  if (captures.me) return;
 
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({
+    const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
         echoCancellation: true,
@@ -106,81 +193,77 @@ async function startMicCapture() {
       video: false,
     });
 
-    audioContext = new AudioContext();
-    await audioContext.audioWorklet.addModule('./audio-processor.js');
-
-    sourceNode = audioContext.createMediaStreamSource(mediaStream);
-    workletNode = new AudioWorkletNode(audioContext, 'pcm-16k-processor');
-    silentGain = audioContext.createGain();
-    silentGain.gain.value = 0;
-
-    workletNode.port.onmessage = (event) => {
-      if (!captureActive || !event.data || !event.data.pcm) return;
-      window.metatron.sendAudioChunk(new Uint8Array(event.data.pcm), event.data.rms || 0);
-    };
-
-    sourceNode.connect(workletNode);
-    workletNode.connect(silentGain);
-    silentGain.connect(audioContext.destination);
-
-    if (audioContext.state === 'suspended') {
-      await audioContext.resume();
-    }
-
-    captureActive = true;
-    console.log(
-      `[Mic] Capturing audio at ${audioContext.sampleRate} Hz -> resampling to 16000 Hz mono 16-bit PCM`
-    );
-
-    const state = await window.metatron.getSttState();
-    renderTranscript(state);
+    captures.me = await createCapturePipeline('me', stream);
   } catch (error) {
-    await stopMicCapture();
+    await teardownCapture('me');
     const msg =
       error && error.name === 'NotAllowedError'
         ? 'Microphone access denied. Enable Microphone permission in System Settings → Privacy & Security → Microphone and restart Metatron.'
         : `Microphone capture failed: ${error && error.message ? error.message : String(error)}`;
-    window.metatron.reportMicError(msg);
+    window.metatron.reportCaptureError('me', msg);
   }
 }
 
-async function stopMicCapture() {
-  captureActive = false;
+async function startSystemAudioCapture() {
+  if (captures.them) return;
 
-  if (workletNode) {
-    workletNode.port.onmessage = null;
-    try {
-      workletNode.disconnect();
-    } catch {}
-    workletNode = null;
-  }
+  try {
+    const displayStream = await navigator.mediaDevices.getDisplayMedia({
+      audio: true,
+      video: true,
+    });
 
-  if (sourceNode) {
-    try {
-      sourceNode.disconnect();
-    } catch {}
-    sourceNode = null;
-  }
-
-  if (silentGain) {
-    try {
-      silentGain.disconnect();
-    } catch {}
-    silentGain = null;
-  }
-
-  if (mediaStream) {
-    for (const track of mediaStream.getTracks()) {
-      track.stop();
+    // Immediately stop and discard all video tracks; we only want loopback audio.
+    for (const videoTrack of displayStream.getVideoTracks()) {
+      videoTrack.stop();
+      displayStream.removeTrack(videoTrack);
     }
-    mediaStream = null;
-  }
 
-  if (audioContext) {
-    try {
-      await audioContext.close();
-    } catch {}
-    audioContext = null;
+    const audioTracks = displayStream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      throw new Error(
+        'No system audio loopback track returned. Confirm Screen & System Audio Recording permission is enabled in System Settings and restart Metatron.'
+      );
+    }
+
+    const audioOnlyStream = new MediaStream(audioTracks);
+    audioTracks[0].addEventListener('ended', () => {
+      if (captures.them) {
+        console.warn('[Audio:them] System audio loopback track ended unexpectedly');
+        window.metatron.reportCaptureError(
+          'them',
+          'System audio capture stopped. Press ⌘⇧T to restart listening.'
+        );
+      }
+    });
+
+    captures.them = await createCapturePipeline('them', audioOnlyStream);
+  } catch (error) {
+    await teardownCapture('them');
+    const msg =
+      error && error.name === 'NotAllowedError'
+        ? 'System audio capture denied. Enable Screen & System Audio Recording in System Settings → Privacy & Security → Screen & System Audio Recording and restart Metatron.'
+        : `System audio capture failed: ${error && error.message ? error.message : String(error)}`;
+    window.metatron.reportCaptureError('them', msg);
+  }
+}
+
+async function handleSttControl({ action, sources = ['me', 'them'] }) {
+  if (action === 'start') {
+    clearError();
+    setStatus('', 'Ready');
+    const tasks = [];
+    if (sources.includes('me')) tasks.push(startMicCapture());
+    if (sources.includes('them')) tasks.push(startSystemAudioCapture());
+    await Promise.all(tasks);
+
+    const state = await window.metatron.getSttState();
+    renderTranscript(state);
+  } else if (action === 'stop') {
+    const tasks = [];
+    if (sources.includes('me')) tasks.push(teardownCapture('me'));
+    if (sources.includes('them')) tasks.push(teardownCapture('them'));
+    await Promise.all(tasks);
   }
 }
 
@@ -201,19 +284,12 @@ window.metatron.getSttState().then((state) => {
   renderTranscript(state);
 });
 
-window.metatron.onSttControl(({ action }) => {
-  if (action === 'start') {
-    startMicCapture();
-  } else if (action === 'stop') {
-    stopMicCapture();
-  }
+window.metatron.onSttControl((payload) => {
+  handleSttControl(payload);
 });
 
-window.metatron.onSttStatus((state) => {
-  setListeningIndicator(state);
-  if (state === 'listening') {
-    clearError();
-  }
+window.metatron.onSttStatus((status) => {
+  setListeningIndicator(status);
 });
 
 window.metatron.onTranscriptUpdate((payload) => {
@@ -222,7 +298,7 @@ window.metatron.onTranscriptUpdate((payload) => {
 
 window.metatron.onSttError((message) => {
   showError(message);
-  setStatus('error', 'Error');
+  setStatus('error', 'Warning');
 });
 
 window.metatron.onStreamStart(() => {

@@ -179,8 +179,9 @@
         background: rgba(239, 68, 68, 0.18);
         border: 1px solid rgba(248, 113, 113, 0.42);
         color: #fecaca;
-        font-size: 12px;
+        font-size: 11.5px;
         line-height: 1.4;
+        white-space: pre-wrap;
         user-select: text;
         flex-shrink: 0;
       }
@@ -201,7 +202,7 @@
 
       .section-suggestion {
         flex: 0 1 auto;
-        max-height: 44%;
+        max-height: 42%;
       }
 
       .section-transcript {
@@ -279,12 +280,20 @@
       .transcript-line {
         font-size: 12.5px;
         line-height: 1.4;
-        color: rgba(241, 245, 249, 0.93);
+        color: rgba(241, 245, 249, 0.94);
         word-break: break-word;
       }
 
+      .transcript-line.source-me {
+        color: rgba(224, 242, 254, 0.95);
+      }
+
+      .transcript-line.source-them {
+        color: rgba(254, 243, 199, 0.95);
+      }
+
       .transcript-line.interim {
-        color: rgba(203, 213, 225, 0.54);
+        opacity: 0.58;
         font-style: italic;
       }
 
@@ -292,8 +301,23 @@
         font-size: 10.5px;
         font-variant-numeric: tabular-nums;
         color: rgba(148, 163, 184, 0.65);
-        margin-right: 6px;
+        margin-right: 5px;
         font-style: normal;
+      }
+
+      .speaker-tag {
+        font-size: 11px;
+        font-weight: 600;
+        margin-right: 5px;
+        font-style: normal;
+      }
+
+      .speaker-tag.me {
+        color: #38bdf8;
+      }
+
+      .speaker-tag.them {
+        color: #fbbf24;
       }
 
       .footer {
@@ -337,7 +361,7 @@
             title="Start/Stop Live Transcription (⌘⇧T)"
           >
             <span class="listen-dot"></span>
-            <span id="listen-label">Mic off</span>
+            <span id="listen-label">Off</span>
           </button>
         </div>
         <div class="header-actions">
@@ -355,7 +379,7 @@
           <div class="section-label">Suggestion</div>
           <div id="response-scroll" class="scroll-area">
             <div id="response" class="response empty">
-              Press ⌘⇧T to listen, then ⌘↩ for a suggested reply.
+              Press ⌘⇧T to listen (Me + Them), then ⌘↩ for a suggested reply.
             </div>
           </div>
         </section>

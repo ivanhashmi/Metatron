@@ -10,8 +10,10 @@ contextBridge.exposeInMainWorld('metatron', {
   ask: () => ipcRenderer.send('overlay:ask'),
   hide: () => ipcRenderer.send('overlay:hide'),
   toggleListening: () => ipcRenderer.send('stt:toggle'),
-  sendAudioChunk: (pcmBytes, rms) => ipcRenderer.send('stt:audio-chunk', pcmBytes, rms),
-  reportMicError: (message) => ipcRenderer.send('stt:mic-error', message),
+  sendAudioChunk: (source, pcmBytes, rms) =>
+    ipcRenderer.send('stt:audio-chunk', source, pcmBytes, rms),
+  reportCaptureError: (source, message) =>
+    ipcRenderer.send('stt:capture-error', source, message),
   getSttState: () => ipcRenderer.invoke('stt:get-state'),
   onStreamStart: (callback) => subscribe('llm:start', callback),
   onStreamChunk: (callback) => subscribe('llm:chunk', callback),

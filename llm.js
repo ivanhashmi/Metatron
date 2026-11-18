@@ -3,7 +3,7 @@ const { GoogleGenAI } = require('@google/genai');
 const DEFAULT_GEMINI_MODELS = ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-2.5-flash'];
 const TRANSIENT_RETRY_DELAY_MS = 600;
 const SYSTEM_INSTRUCTION =
-  'You are a discreet meeting assistant. Suggest what I should say next, in one or two sentences.';
+  'You are a discreet real-time meeting assistant. In the transcript, "Them" is the other party on the call and "Me" is the user. Suggest what the user ("Me") should say next, in one or two concise sentences.';
 
 function extractReadableMessage(error) {
   let msg = error && error.message ? String(error.message) : String(error || 'Unknown error');
