@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Metatron</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+        color: rgba(244, 246, 250, 0.94);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .overlay {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        height: 100%;
+        background: rgba(16, 18, 24, 0.84);
+        backdrop-filter: blur(18px);
+        -webkit-backdrop-filter: blur(18px);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 14px;
+        overflow: hidden;
+      }
+
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        -webkit-app-region: drag;
+        user-select: none;
+        flex-shrink: 0;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #5eead4;
+        transition: background 0.15s ease;
+      }
+
+      .status-dot.streaming {
+        background: #60a5fa;
+        animation: pulse 1s infinite ease-in-out;
+      }
+
+      .status-dot.error {
+        background: #f87171;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.35;
+        }
+      }
+
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        -webkit-app-region: no-drag;
+      }
+
+      .icon-btn {
+        appearance: none;
+        border: none;
+        background: rgba(255, 255, 255, 0.08);
+        color: rgba(244, 246, 250, 0.85);
+        font-size: 11px;
+        line-height: 1;
+        padding: 4px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: background 0.12s ease;
+      }
+
+      .icon-btn:hover {
+        background: rgba(255, 255, 255, 0.16);
+      }
+
+      .content {
+        flex: 1;
+        padding: 12px 14px;
+        overflow-y: auto;
+        -webkit-app-region: no-drag;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .content::-webkit-scrollbar {
+        width: 5px;
+      }
+
+      .content::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.18);
+        border-radius: 999px;
+      }
+
+      .prompt-preview {
+        font-size: 11.5px;
+        line-height: 1.4;
+        color: rgba(203, 213, 225, 0.68);
+        padding-bottom: 6px;
+        border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
+      }
+
+      .response {
+        font-size: 13.5px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+        user-select: text;
+        color: rgba(248, 250, 252, 0.95);
+      }
+
+      .response.empty {
+        color: rgba(203, 213, 225, 0.55);
+        font-size: 12.5px;
+      }
+
+      .response.streaming::after {
+        content: '▍';
+        display: inline-block;
+        margin-left: 2px;
+        color: #60a5fa;
+        animation: blink 0.9s steps(1) infinite;
+      }
+
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+
+      .error-box {
+        display: none;
+        padding: 10px 11px;
+        border-radius: 8px;
+        background: rgba(239, 68, 68, 0.18);
+        border: 1px solid rgba(248, 113, 113, 0.42);
+        color: #fecaca;
+        font-size: 12.5px;
+        line-height: 1.45;
+        user-select: text;
+      }
+
+      .error-box.visible {
+        display: block;
+      }
+
+      .footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 7px 12px;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 11px;
+        color: rgba(203, 213, 225, 0.6);
+        user-select: none;
+        flex-shrink: 0;
+        -webkit-app-region: drag;
+      }
+
+      .hints {
+        display: flex;
+        gap: 10px;
+      }
+
+      kbd {
+        font-family: inherit;
+        background: rgba(255, 255, 255, 0.1);
+        padding: 1px 5px;
+        border-radius: 4px;
+        color: rgba(244, 246, 250, 0.85);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="overlay">
+      <header class="header">
+        <div class="brand">
+          <span id="status-dot" class="status-dot"></span>
+          <span>Metatron</span>
+        </div>
+        <div class="header-actions">
+          <button id="ask-btn" class="icon-btn" type="button" title="Ask (⌘↩)">Ask</button>
+          <button id="hide-btn" class="icon-btn" type="button" title="Hide (⌘⇧Space)">✕</button>
+        </div>
+      </header>
+
+      <main id="content" class="content">
+        <div id="prompt-preview" class="prompt-preview"></div>
+        <div id="error-box" class="error-box" role="alert"></div>
+        <div id="response" class="response empty">
+          Press ⌘↩ to ask Metatron using the current context.
+        </div>
+      </main>
+
+      <footer class="footer">
+        <div class="hints">
+          <span><kbd>⌘↩</kbd> Ask</span>
+          <span><kbd>⌘⇧Space</kbd> Toggle</span>
+        </div>
+        <span id="status-text">Ready</span>
+      </footer>
+    </div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
