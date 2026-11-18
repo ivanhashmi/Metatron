@@ -38,7 +38,7 @@ A minimal macOS meeting assistant overlay built with Electron and the Gemini API
    GEMINI_API_KEY=your_real_key_here
    ```
 
-   *(Optional)* Set `GEMINI_MODEL` in `.env` to override the default model (`gemini-3.8-flash`).
+   *(Optional)* Set `GEMINI_MODEL` in `.env` to override the default model (`gemini-3.5-flash-lite`, with automatic retry and fallback on transient `503` high-demand errors).
 
 ## Run
 
