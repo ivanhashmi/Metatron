@@ -19,8 +19,17 @@ app.setName('Metatron');
 const TRANSCRIPT_RETENTION_MS = 3 * 60 * 1000; // Rolling ~3 minutes displayed
 const LLM_CONTEXT_WINDOW_MS = 2 * 60 * 1000; // Last ~2 minutes sent to LLM
 const PRUNE_INTERVAL_MS = 15 * 1000;
+
+const SCREENSHOT_MAX_SIDE_PX = 1280;
+const SCREENSHOT_JPEG_QUALITY = 75;
+const SCREENSHOT_THUMB_WIDTH_PX = 160;
+const OVERLAY_HIDE_SETTLE_MS = 80;
+
 const MEETING_SYSTEM_PROMPT =
   'You are a discreet real-time meeting assistant. In the transcript, "Them" is the other party on the call and "Me" is the user. Suggest what the user ("Me") should say next, in one or two concise sentences.';
+
+const VISION_MEETING_SYSTEM_PROMPT =
+  'You are a discreet real-time meeting assistant. In the transcript, "Them" is the other party on the call and "Me" is the user. Use both the attached screen capture and the recent transcript (if provided) to give a concise, practical answer or suggest what the user ("Me") should say next in one to three short sentences.';
 
 const SOURCE_LABELS = {
   me: 'Me',
@@ -28,7 +37,7 @@ const SOURCE_LABELS = {
 };
 
 const SCREEN_PERMISSION_INSTRUCTIONS =
-  'Screen Recording permission is not granted (needed for system audio / "Them"). Open System Settings → Privacy & Security → Screen & System Audio Recording, enable Electron (or your terminal app), then quit and restart Metatron.';
+  'Screen Recording permission is not granted (needed for system audio / "Them" and screenshots). Open System Settings → Privacy & Security → Screen & System Audio Recording, enable Electron (or your terminal app), then quit and restart Metatron.';
 
 let mainWindow = null;
 let currentAbortController = null;
@@ -44,6 +53,9 @@ const sourceStates = {
 };
 let isListening = false;
 let isStartingTranscription = false;
+let isCapturingScreenshot = false;
+
+let attachedScreenshot = null; // { buffer, mimeType, width, height, sizeKb, capturedAt, thumbnailDataUrl }
 
 let transcriptEntries = []; // { id, source, label, text, timestamp }
 const interimBySource = {
@@ -52,6 +64,10 @@ const interimBySource = {
 };
 let nextEntryId = 1;
 let pruneTimer = null;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function formatTimestamp(ms) {
   const date = new Date(ms);
@@ -82,6 +98,21 @@ function broadcastStatus() {
     overall: getAggregateStatus(),
     sources: { ...sourceStates },
   });
+}
+
+function getScreenshotSummary() {
+  if (!attachedScreenshot) return null;
+  return {
+    width: attachedScreenshot.width,
+    height: attachedScreenshot.height,
+    sizeKb: attachedScreenshot.sizeKb,
+    time: formatTimestamp(attachedScreenshot.capturedAt),
+    thumbnailDataUrl: attachedScreenshot.thumbnailDataUrl,
+  };
+}
+
+function broadcastScreenshot() {
+  sendToRenderer('screenshot:update', getScreenshotSummary());
 }
 
 function pruneTranscript(now = Date.now()) {
@@ -158,10 +189,10 @@ function buildTranscriptContext() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 430,
-    height: 400,
-    minWidth: 330,
-    minHeight: 270,
+    width: 440,
+    height: 430,
+    minWidth: 340,
+    minHeight: 280,
     title: 'Metatron',
     frame: false,
     transparent: true,
@@ -243,6 +274,130 @@ async function ensureMicrophoneAccess() {
   const granted = await systemPreferences.askForMediaAccess('microphone');
   console.log(`[Mic] askForMediaAccess('microphone') result: ${granted}`);
   return granted;
+}
+
+async function capturePrimaryScreenScreenshot() {
+  if (isCapturingScreenshot) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  const screenStatus = getScreenPermissionStatus();
+  console.log(`[Screenshot] Screen Recording permission status: ${screenStatus}`);
+
+  if (screenStatus !== 'granted') {
+    if (!mainWindow.isVisible()) {
+      mainWindow.showInactive();
+    }
+    sendToRenderer('stt:error', SCREEN_PERMISSION_INSTRUCTIONS);
+    if (process.platform === 'darwin' && screenStatus === 'not-determined') {
+      desktopCapturer
+        .getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } })
+        .catch(() => {});
+    }
+    return;
+  }
+
+  isCapturingScreenshot = true;
+  const startTime = Date.now();
+  const wasVisible = mainWindow.isVisible();
+
+  try {
+    // Temporarily hide the Metatron overlay so it never appears in the captured frame.
+    if (wasVisible) {
+      mainWindow.hide();
+      await delay(OVERLAY_HIDE_SETTLE_MS);
+    }
+
+    const primaryDisplay = screen.getPrimaryDisplay();
+    const { width: dispW, height: dispH } = primaryDisplay.size;
+    const scale = Math.min(1, SCREENSHOT_MAX_SIDE_PX / Math.max(dispW, dispH));
+    const requestedSize = {
+      width: Math.max(1, Math.round(dispW * scale)),
+      height: Math.max(1, Math.round(dispH * scale)),
+    };
+
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: requestedSize,
+    });
+
+    if (!sources || sources.length === 0) {
+      throw new Error(
+        'No screen source returned. Check Screen & System Audio Recording permission in System Settings.'
+      );
+    }
+
+    const primaryDisplayId = String(primaryDisplay.id);
+    const primarySource =
+      sources.find((s) => s.display_id === primaryDisplayId) || sources[0];
+
+    let image = primarySource.thumbnail;
+    if (!image || image.isEmpty()) {
+      throw new Error(
+        'Captured screen image was empty. Verify Screen & System Audio Recording permission is enabled and restart Metatron.'
+      );
+    }
+
+    let { width: imgW, height: imgH } = image.getSize();
+    const longestSide = Math.max(imgW, imgH);
+    if (longestSide > SCREENSHOT_MAX_SIDE_PX) {
+      const downscale = SCREENSHOT_MAX_SIDE_PX / longestSide;
+      image = image.resize({
+        width: Math.max(1, Math.round(imgW * downscale)),
+        height: Math.max(1, Math.round(imgH * downscale)),
+        quality: 'good',
+      });
+      const resized = image.getSize();
+      imgW = resized.width;
+      imgH = resized.height;
+    }
+
+    const jpegBuffer = image.toJPEG(SCREENSHOT_JPEG_QUALITY);
+    if (!jpegBuffer || jpegBuffer.length === 0) {
+      throw new Error('Failed to encode captured screen image as JPEG.');
+    }
+
+    const thumbImage = image.resize({
+      width: Math.min(SCREENSHOT_THUMB_WIDTH_PX, imgW),
+      quality: 'good',
+    });
+    const thumbBuffer = thumbImage.toJPEG(70);
+    const thumbnailDataUrl = `data:image/jpeg;base64,${thumbBuffer.toString('base64')}`;
+
+    const captureMs = Date.now() - startTime;
+    const sizeKb = Number((jpegBuffer.length / 1024).toFixed(1));
+
+    attachedScreenshot = {
+      buffer: jpegBuffer,
+      mimeType: 'image/jpeg',
+      width: imgW,
+      height: imgH,
+      sizeKb,
+      capturedAt: Date.now(),
+      thumbnailDataUrl,
+    };
+
+    console.log(
+      `[Screenshot] Captured primary screen (${imgW}x${imgH}) in ${captureMs}ms (${sizeKb} KB JPEG)`
+    );
+    broadcastScreenshot();
+  } catch (error) {
+    const msg =
+      error && error.message ? error.message : 'Failed to capture screen screenshot.';
+    console.error('[Screenshot] Capture failed:', msg);
+    sendToRenderer('stt:error', `${msg}\n\n${SCREEN_PERMISSION_INSTRUCTIONS}`);
+  } finally {
+    if (wasVisible && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.showInactive();
+    }
+    isCapturingScreenshot = false;
+  }
+}
+
+function clearScreenshot() {
+  if (!attachedScreenshot) return;
+  attachedScreenshot = null;
+  console.log('[Screenshot] Cleared attached screenshot');
+  broadcastScreenshot();
 }
 
 function initSttSession(source) {
@@ -329,8 +484,6 @@ async function startTranscription() {
       sourcesToStart.push('them');
     } else {
       warnings.push(SCREEN_PERMISSION_INSTRUCTIONS);
-      // Trigger a lightweight desktopCapturer probe when status is not-determined so macOS
-      // prompts/registers Metatron under Screen & System Audio Recording.
       if (process.platform === 'darwin' && screenStatus === 'not-determined') {
         desktopCapturer
           .getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } })
@@ -413,7 +566,7 @@ async function toggleTranscription() {
   }
 }
 
-async function runContextPrompt() {
+async function runContextPrompt({ includeScreenshot = false } = {}) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
   if (!mainWindow.isVisible()) {
@@ -421,7 +574,17 @@ async function runContextPrompt() {
   }
 
   const context = buildTranscriptContext();
-  if (!context) {
+  const screenshot = includeScreenshot ? attachedScreenshot : null;
+
+  if (includeScreenshot && !screenshot) {
+    sendToRenderer(
+      'llm:error',
+      'No screenshot attached yet. Press ⌘⇧S to capture the screen first, then press ⌘⇧↩.'
+    );
+    return;
+  }
+
+  if (!includeScreenshot && !context) {
     sendToRenderer(
       'llm:error',
       'No transcript in the last 2 minutes yet. Press ⌘⇧T to start listening first.'
@@ -436,22 +599,41 @@ async function runContextPrompt() {
   const controller = new AbortController();
   currentAbortController = controller;
   const requestId = ++activeRequestId;
+  const requestStartMs = Date.now();
+  const mode = includeScreenshot ? 'vision+transcript' : 'transcript-only';
+
+  const prompt = includeScreenshot
+    ? context
+      ? `Recent meeting transcript (last ~2 minutes):\n${context}\n\nUsing the attached screenshot and the transcript above, what should I ("Me") say next?`
+      : 'No recent transcript is available yet. Look at the attached screenshot and briefly tell me what is most relevant or what I ("Me") should say next.'
+    : `Recent meeting transcript (last ~2 minutes):\n${context}\n\nWhat should I ("Me") say next?`;
+
+  const systemInstruction = includeScreenshot
+    ? VISION_MEETING_SYSTEM_PROMPT
+    : MEETING_SYSTEM_PROMPT;
 
   console.log(
-    `[LLM] Sending ${context.length} chars of labeled transcript context (last ~2 min) to Gemini`
+    `[LLM] Starting request (mode=${mode}, transcript=${context.length} chars` +
+      (screenshot ? `, image=${screenshot.sizeKb} KB ${screenshot.width}x${screenshot.height})` : ')')
   );
-  sendToRenderer('llm:start', { context });
-
-  const prompt = `Recent meeting transcript (last ~2 minutes):\n${context}\n\nWhat should I ("Me") say next?`;
+  sendToRenderer('llm:start', { context, includeScreenshot });
 
   try {
     let receivedAnyChunk = false;
+    let firstTokenMs = null;
+
     for await (const chunk of streamResponse(prompt, {
       signal: controller.signal,
-      systemInstruction: MEETING_SYSTEM_PROMPT,
+      systemInstruction,
+      image: screenshot
+        ? { mimeType: screenshot.mimeType, data: screenshot.buffer }
+        : undefined,
     })) {
       if (requestId !== activeRequestId || controller.signal.aborted) {
         return;
+      }
+      if (!receivedAnyChunk) {
+        firstTokenMs = Date.now() - requestStartMs;
       }
       receivedAnyChunk = true;
       sendToRenderer('llm:chunk', chunk);
@@ -466,12 +648,18 @@ async function runContextPrompt() {
       return;
     }
 
+    const totalMs = Date.now() - requestStartMs;
+    console.log(
+      `[LLM] Completed request (mode=${mode}, ttft=${firstTokenMs}ms, total=${totalMs}ms)`
+    );
     sendToRenderer('llm:end');
   } catch (error) {
     if (requestId !== activeRequestId || controller.signal.aborted) {
       return;
     }
+    const totalMs = Date.now() - requestStartMs;
     const message = error && error.message ? error.message : 'Unexpected error calling LLM.';
+    console.error(`[LLM] Request failed (mode=${mode}, elapsed=${totalMs}ms):`, message);
     sendToRenderer('llm:error', message);
   } finally {
     if (currentAbortController === controller) {
@@ -481,25 +669,20 @@ async function runContextPrompt() {
 }
 
 function registerShortcuts() {
-  const toggleRegistered = globalShortcut.register('CommandOrControl+Shift+Space', () => {
-    toggleWindow();
-  });
-  if (!toggleRegistered) {
-    console.warn('Metatron: Failed to register global shortcut CommandOrControl+Shift+Space');
-  }
+  const shortcuts = [
+    ['CommandOrControl+Shift+Space', () => toggleWindow()],
+    ['CommandOrControl+Return', () => runContextPrompt({ includeScreenshot: false })],
+    ['CommandOrControl+Shift+Return', () => runContextPrompt({ includeScreenshot: true })],
+    ['CommandOrControl+Shift+T', () => toggleTranscription()],
+    ['CommandOrControl+Shift+S', () => capturePrimaryScreenScreenshot()],
+    ['CommandOrControl+Shift+X', () => clearScreenshot()],
+  ];
 
-  const askRegistered = globalShortcut.register('CommandOrControl+Return', () => {
-    runContextPrompt();
-  });
-  if (!askRegistered) {
-    console.warn('Metatron: Failed to register global shortcut CommandOrControl+Return');
-  }
-
-  const transcribeRegistered = globalShortcut.register('CommandOrControl+Shift+T', () => {
-    toggleTranscription();
-  });
-  if (!transcribeRegistered) {
-    console.warn('Metatron: Failed to register global shortcut CommandOrControl+Shift+T');
+  for (const [accelerator, handler] of shortcuts) {
+    const ok = globalShortcut.register(accelerator, handler);
+    if (!ok) {
+      console.warn(`Metatron: Failed to register global shortcut ${accelerator}`);
+    }
   }
 }
 
@@ -543,12 +726,17 @@ function configureMediaPermissions() {
   });
 }
 
-ipcMain.on('overlay:ask', () => runContextPrompt());
+ipcMain.on('overlay:ask', () => runContextPrompt({ includeScreenshot: false }));
+ipcMain.on('overlay:ask-with-screenshot', () => runContextPrompt({ includeScreenshot: true }));
 ipcMain.on('overlay:hide', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.hide();
   }
 });
+
+ipcMain.on('screenshot:capture', () => capturePrimaryScreenScreenshot());
+ipcMain.on('screenshot:clear', () => clearScreenshot());
+ipcMain.handle('screenshot:get-state', () => getScreenshotSummary());
 
 ipcMain.on('stt:toggle', () => {
   toggleTranscription();

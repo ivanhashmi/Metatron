@@ -7,8 +7,14 @@ const responseScroll = document.getElementById('response-scroll');
 const transcriptList = document.getElementById('transcript-list');
 const transcriptScroll = document.getElementById('transcript-scroll');
 const errorBox = document.getElementById('error-box');
+const snapBtn = document.getElementById('snap-btn');
 const askBtn = document.getElementById('ask-btn');
 const hideBtn = document.getElementById('hide-btn');
+const screenshotBar = document.getElementById('screenshot-bar');
+const screenshotThumb = document.getElementById('screenshot-thumb');
+const screenshotMeta = document.getElementById('screenshot-meta');
+const sendScreenshotBtn = document.getElementById('send-screenshot-btn');
+const clearScreenshotBtn = document.getElementById('clear-screenshot-btn');
 
 const captures = {
   me: null,
@@ -42,6 +48,19 @@ function setListeningIndicator(status) {
   } else {
     listenLabel.textContent = 'Off';
   }
+}
+
+function renderScreenshot(summary) {
+  if (!summary) {
+    screenshotBar.classList.remove('visible');
+    screenshotThumb.removeAttribute('src');
+    screenshotMeta.textContent = '';
+    return;
+  }
+
+  screenshotThumb.src = summary.thumbnailDataUrl;
+  screenshotMeta.textContent = `${summary.width}×${summary.height} · ${summary.sizeKb} KB · ${summary.time}`;
+  screenshotBar.classList.add('visible');
 }
 
 function showError(message) {
@@ -267,6 +286,10 @@ async function handleSttControl({ action, sources = ['me', 'them'] }) {
   }
 }
 
+snapBtn.addEventListener('click', () => {
+  window.metatron.captureScreenshot();
+});
+
 askBtn.addEventListener('click', () => {
   window.metatron.ask();
 });
@@ -279,9 +302,21 @@ listenPill.addEventListener('click', () => {
   window.metatron.toggleListening();
 });
 
+sendScreenshotBtn.addEventListener('click', () => {
+  window.metatron.askWithScreenshot();
+});
+
+clearScreenshotBtn.addEventListener('click', () => {
+  window.metatron.clearScreenshot();
+});
+
 window.metatron.getSttState().then((state) => {
   setListeningIndicator(state.status);
   renderTranscript(state);
+});
+
+window.metatron.getScreenshotState().then((summary) => {
+  renderScreenshot(summary);
 });
 
 window.metatron.onSttControl((payload) => {
@@ -296,17 +331,25 @@ window.metatron.onTranscriptUpdate((payload) => {
   renderTranscript(payload);
 });
 
+window.metatron.onScreenshotUpdate((summary) => {
+  if (summary) {
+    clearError();
+    setStatus('', 'Ready');
+  }
+  renderScreenshot(summary);
+});
+
 window.metatron.onSttError((message) => {
   showError(message);
   setStatus('error', 'Warning');
 });
 
-window.metatron.onStreamStart(() => {
+window.metatron.onStreamStart(({ includeScreenshot } = {}) => {
   clearError();
   responseEl.textContent = '';
   responseEl.classList.remove('empty');
   responseEl.classList.add('streaming');
-  setStatus('streaming', 'Streaming…');
+  setStatus('streaming', includeScreenshot ? 'Streaming (+img)…' : 'Streaming…');
   scrollToBottom(responseScroll);
 });
 
@@ -325,7 +368,7 @@ window.metatron.onStreamError((message) => {
   responseEl.classList.remove('streaming');
   if (!responseEl.textContent.trim()) {
     responseEl.classList.add('empty');
-    responseEl.textContent = 'Press ⌘↩ to try again.';
+    responseEl.textContent = 'Press ⌘↩ (transcript) or ⌘⇧↩ (with screenshot) to try again.';
   }
   showError(message);
   setStatus('error', 'Error');

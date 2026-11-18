@@ -2,7 +2,7 @@
 
 A minimal macOS meeting assistant overlay built with Electron, Deepgram (`nova-3`), and the Gemini API.
 
-## Features (Steps 1–4)
+## Features
 
 - Frameless, transparent, dark rounded always-on-top overlay that stays visible over other apps and across macOS Spaces.
 - Dual-stream live transcription:
@@ -10,11 +10,15 @@ A minimal macOS meeting assistant overlay built with Electron, Deepgram (`nova-3
   - **Them** (system audio loopback via `setDisplayMediaRequestHandler` + `getDisplayMedia` with video track discarded + dedicated `AudioWorklet`, 16-bit PCM @ 16 kHz mono)
 - Separate Deepgram `nova-3` WebSocket connections per source (`me` and `them`), each with independent `KeepAlive` during silence and exponential-backoff reconnection.
 - Rolling ~3-minute timestamped transcript merged chronologically with color-coded **Me** and **Them** labels (lighter italic interim lines, normal finalized lines, auto-scrolling).
+- On-demand screenshot context: captures the primary screen (hiding Metatron during capture), downscales the longest side to `~1280px` JPEG, previews a thumbnail in the overlay, and only sends the screenshot when explicitly triggered.
 - Global shortcuts:
   - `Cmd+Shift+Space`: Toggle showing/hiding the overlay.
   - `Cmd+Shift+T`: Start/stop both microphone and system audio transcription together.
-  - `Cmd+Enter`: Send the last ~2 minutes of labeled (`Me` / `Them`) transcript as `context` to Gemini and stream a 1–2 sentence suggested reply into the overlay.
-- Isolated provider modules: `llm.js` (Gemini) and `stt.js` (Deepgram).
+  - `Cmd+Enter`: Send the last ~2 minutes of labeled (`Me` / `Them`) transcript to Gemini (never sends screenshots automatically).
+  - `Cmd+Shift+S`: Capture primary screen screenshot and attach it to the overlay.
+  - `Cmd+Shift+Enter`: Send the attached screenshot + last ~2 minutes of labeled transcript to a vision-capable Gemini model and stream the response.
+  - `Cmd+Shift+X`: Clear the attached screenshot.
+- Isolated provider modules: `llm.js` (Gemini text + vision) and `stt.js` (Deepgram).
 - Secure Electron setup (`contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, minimal `preload.js` IPC bridge).
 
 ## Prerequisites
@@ -45,7 +49,7 @@ A minimal macOS meeting assistant overlay built with Electron, Deepgram (`nova-3
    DEEPGRAM_API_KEY=your_real_deepgram_key
    ```
 
-   *(Optional)* Set `GEMINI_MODEL` in `.env` to override the default model (`gemini-3.5-flash-lite`, with automatic retry and fallback on transient `503` high-demand errors).
+   *(Optional)* Set `GEMINI_MODEL` in `.env` to override the default vision-capable model (`gemini-3.5-flash-lite`, with automatic retry and fallback on transient `503` high-demand errors).
 
 ## Run
 
@@ -55,11 +59,11 @@ npm start
 
 ## Project Structure
 
-- `main.js` — Electron main process, overlay window config, global shortcuts, macOS Microphone & Screen Recording permission checks, `setDisplayMediaRequestHandler` (`audio: 'loopback'`), merged rolling transcript buffer, and IPC wiring.
+- `main.js` — Electron main process, overlay window config, global shortcuts, macOS Microphone & Screen Recording permission checks, `setDisplayMediaRequestHandler` (`audio: 'loopback'`), on-demand screen capture, merged rolling transcript buffer, and IPC wiring.
 - `preload.js` — Secure `contextBridge` API exposed to the renderer as `window.metatron`.
-- `renderer.html` — Frameless dark translucent overlay layout and styles (color-coded `Me` and `Them` transcript lines).
+- `renderer.html` — Frameless dark translucent overlay layout and styles (screenshot attachment preview + color-coded `Me` and `Them` transcript).
 - `renderer.js` — Dual `AudioWorklet` capture pipelines (`me` mic + `them` system audio loopback) and overlay UI logic.
 - `audio-processor.js` — `AudioWorkletProcessor` that mixes to mono and resamples audio to 16 kHz 16-bit PCM.
 - `stt.js` — Isolated speech-to-text provider module (independent Deepgram `nova-3` WebSocket session per source).
-- `llm.js` — Isolated LLM provider module (Gemini via `@google/genai`).
+- `llm.js` — Isolated LLM provider module (Gemini text + multimodal vision via `@google/genai`).
 - `.env.example` — Template for required environment variables (`.env` is gitignored).

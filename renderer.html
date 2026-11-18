@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Metatron</title>
@@ -141,7 +141,7 @@
       .header-actions {
         display: flex;
         align-items: center;
-        gap: 6px;
+        gap: 5px;
         -webkit-app-region: no-drag;
       }
 
@@ -152,7 +152,7 @@
         color: rgba(244, 246, 250, 0.85);
         font-size: 11px;
         line-height: 1;
-        padding: 4px 8px;
+        padding: 4px 7px;
         border-radius: 6px;
         cursor: pointer;
         transition: background 0.12s ease;
@@ -190,6 +190,60 @@
         display: block;
       }
 
+      .screenshot-bar {
+        display: none;
+        align-items: center;
+        gap: 9px;
+        padding: 6px 8px;
+        border-radius: 9px;
+        background: rgba(56, 189, 248, 0.11);
+        border: 1px solid rgba(56, 189, 248, 0.32);
+        flex-shrink: 0;
+      }
+
+      .screenshot-bar.visible {
+        display: flex;
+      }
+
+      .screenshot-thumb {
+        width: 54px;
+        height: 34px;
+        object-fit: cover;
+        border-radius: 5px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        background: rgba(0, 0, 0, 0.35);
+        flex-shrink: 0;
+      }
+
+      .screenshot-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .screenshot-title {
+        font-size: 11.5px;
+        font-weight: 600;
+        color: #bae6fd;
+      }
+
+      .screenshot-meta {
+        font-size: 10.5px;
+        color: rgba(203, 213, 225, 0.72);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .screenshot-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        flex-shrink: 0;
+      }
+
       .section {
         display: flex;
         flex-direction: column;
@@ -202,7 +256,7 @@
 
       .section-suggestion {
         flex: 0 1 auto;
-        max-height: 42%;
+        max-height: 40%;
       }
 
       .section-transcript {
@@ -324,9 +378,10 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
+        gap: 8px;
         padding: 7px 12px;
         border-top: 1px solid rgba(255, 255, 255, 0.08);
-        font-size: 11px;
+        font-size: 10.5px;
         color: rgba(203, 213, 225, 0.6);
         user-select: none;
         flex-shrink: 0;
@@ -335,7 +390,7 @@
 
       .hints {
         display: flex;
-        gap: 8px;
+        gap: 7px;
         flex-wrap: wrap;
       }
 
@@ -365,8 +420,11 @@
           </button>
         </div>
         <div class="header-actions">
-          <button id="ask-btn" class="icon-btn" type="button" title="Suggest next reply (⌘↩)">
-            Suggest
+          <button id="snap-btn" class="icon-btn" type="button" title="Capture screen (⌘⇧S)">
+            Snap
+          </button>
+          <button id="ask-btn" class="icon-btn" type="button" title="Suggest from transcript (⌘↩)">
+            Ask
           </button>
           <button id="hide-btn" class="icon-btn" type="button" title="Hide (⌘⇧Space)">✕</button>
         </div>
@@ -375,11 +433,37 @@
       <main class="body">
         <div id="error-box" class="error-box" role="alert"></div>
 
+        <div id="screenshot-bar" class="screenshot-bar">
+          <img id="screenshot-thumb" class="screenshot-thumb" alt="Attached screen capture" />
+          <div class="screenshot-info">
+            <div class="screenshot-title">Screenshot attached</div>
+            <div id="screenshot-meta" class="screenshot-meta"></div>
+          </div>
+          <div class="screenshot-actions">
+            <button
+              id="send-screenshot-btn"
+              class="icon-btn"
+              type="button"
+              title="Send screenshot + transcript (⌘⇧↩)"
+            >
+              ⌘⇧↩
+            </button>
+            <button
+              id="clear-screenshot-btn"
+              class="icon-btn"
+              type="button"
+              title="Clear screenshot (⌘⇧X)"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+
         <section class="section section-suggestion">
           <div class="section-label">Suggestion</div>
           <div id="response-scroll" class="scroll-area">
             <div id="response" class="response empty">
-              Press ⌘⇧T to listen (Me + Them), then ⌘↩ for a suggested reply.
+              ⌘⇧T listen · ⌘↩ ask transcript · ⌘⇧S snap · ⌘⇧↩ ask with screenshot
             </div>
           </div>
         </section>
@@ -397,8 +481,10 @@
       <footer class="footer">
         <div class="hints">
           <span><kbd>⌘⇧T</kbd> Listen</span>
-          <span><kbd>⌘↩</kbd> Suggest</span>
-          <span><kbd>⌘⇧Space</kbd> Toggle</span>
+          <span><kbd>⌘⇧S</kbd> Snap</span>
+          <span><kbd>⌘↩</kbd> Ask</span>
+          <span><kbd>⌘⇧↩</kbd> +Img</span>
+          <span><kbd>⌘⇧X</kbd> Clear</span>
         </div>
         <span id="status-text">Ready</span>
       </footer>

@@ -91,15 +91,36 @@ function getCandidateModels() {
   return [...new Set(list)];
 }
 
+function buildGeminiContents(prompt, image) {
+  if (!image || !image.data) {
+    return prompt;
+  }
+
+  const base64Data = Buffer.isBuffer(image.data)
+    ? image.data.toString('base64')
+    : String(image.data);
+
+  return [
+    { text: prompt },
+    {
+      inlineData: {
+        mimeType: image.mimeType || 'image/jpeg',
+        data: base64Data,
+      },
+    },
+  ];
+}
+
 /**
- * Gemini provider implementation.
+ * Gemini provider implementation (text and multimodal vision).
  * To add another provider (e.g. Groq), implement an object with the same
- * `async *stream(prompt, { signal })` method and swap `activeProvider` below.
+ * `async *stream(prompt, { signal, systemInstruction, image })` method and
+ * swap `activeProvider` below.
  */
 const geminiProvider = {
   name: 'gemini',
 
-  async *stream(prompt, { signal, systemInstruction } = {}) {
+  async *stream(prompt, { signal, systemInstruction, image } = {}) {
     const apiKey = (process.env.GEMINI_API_KEY || '').trim();
     if (!apiKey || apiKey === 'your_gemini_api_key_here') {
       throw new Error(
@@ -110,6 +131,8 @@ const geminiProvider = {
     const ai = new GoogleGenAI({ apiKey });
     const models = getCandidateModels();
     const instruction = systemInstruction || SYSTEM_INSTRUCTION;
+    const contents = buildGeminiContents(prompt, image);
+    const hasImage = Boolean(image && image.data);
     let lastError = null;
 
     for (const model of models) {
@@ -117,11 +140,15 @@ const geminiProvider = {
       for (let attempt = 0; attempt < 2; attempt++) {
         if (signal && signal.aborted) return;
 
+        const attemptStart = Date.now();
         let yieldedAnyChunk = false;
         try {
+          console.log(
+            `[LLM:gemini] Calling model=${model} (vision=${hasImage}, attempt=${attempt + 1})`
+          );
           const responseStream = await ai.models.generateContentStream({
             model,
-            contents: prompt,
+            contents,
             config: {
               systemInstruction: instruction,
               abortSignal: signal,
@@ -131,11 +158,19 @@ const geminiProvider = {
           for await (const chunk of responseStream) {
             if (signal && signal.aborted) return;
             if (chunk && chunk.text) {
+              if (!yieldedAnyChunk) {
+                console.log(
+                  `[LLM:gemini] First token from ${model} in ${Date.now() - attemptStart}ms`
+                );
+              }
               yieldedAnyChunk = true;
               yield chunk.text;
             }
           }
 
+          console.log(
+            `[LLM:gemini] Stream finished from ${model} in ${Date.now() - attemptStart}ms`
+          );
           return;
         } catch (error) {
           if (signal && signal.aborted) return;
@@ -148,15 +183,18 @@ const geminiProvider = {
 
           if (isTransientUnavailableError(error)) {
             if (attempt === 0) {
+              console.warn(
+                `[LLM:gemini] ${model} returned 503; retrying in ${TRANSIENT_RETRY_DELAY_MS}ms...`
+              );
               await sleep(TRANSIENT_RETRY_DELAY_MS, signal);
               continue;
             }
-            // Move on to the next fallback model.
+            console.warn(`[LLM:gemini] ${model} still unavailable (503); trying fallback model...`);
             break;
           }
 
           if (isModelNotFoundError(error)) {
-            // Skip straight to the next fallback model.
+            console.warn(`[LLM:gemini] ${model} not found (404); trying fallback model...`);
             break;
           }
 
@@ -176,7 +214,7 @@ const activeProvider = geminiProvider;
 /**
  * Stream completion text chunks from the active LLM provider.
  * @param {string} prompt
- * @param {{ signal?: AbortSignal }} [options]
+ * @param {{ signal?: AbortSignal, systemInstruction?: string, image?: { mimeType: string, data: Buffer | string } }} [options]
  * @returns {AsyncGenerator<string, void, unknown>}
  */
 async function* streamResponse(prompt, options = {}) {
