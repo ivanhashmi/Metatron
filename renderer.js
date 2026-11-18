@@ -6,6 +6,11 @@ const modeBtn = document.getElementById('mode-btn');
 const langSelect = document.getElementById('lang-select');
 const snapBtn = document.getElementById('snap-btn');
 const hideBtn = document.getElementById('hide-btn');
+const modelTrigger = document.getElementById('model-trigger');
+const activeProviderBadge = document.getElementById('active-provider-badge');
+const activeModelLabel = document.getElementById('active-model-label');
+const activeVisionBadge = document.getElementById('active-vision-badge');
+const modelDropdown = document.getElementById('model-dropdown');
 const errorBox = document.getElementById('error-box');
 const screenshotBar = document.getElementById('screenshot-bar');
 const screenshotThumb = document.getElementById('screenshot-thumb');
@@ -27,7 +32,13 @@ const captures = {
   them: null,
 };
 
-let currentConfig = { language: 'cpp', mode: 'coding' };
+let currentConfig = {
+  language: 'cpp',
+  mode: 'coding',
+  selectedModel: '',
+  models: [],
+  activeModel: null,
+};
 let activeAssistantEl = null;
 let activeAssistantBodyEl = null;
 let activeAssistantRawText = '';
@@ -39,6 +50,59 @@ function hasActiveCapture() {
 function setStatus(state, label) {
   statusDot.className = 'status-dot' + (state ? ` ${state}` : '');
   statusText.textContent = label;
+}
+
+function closeModelDropdown() {
+  modelDropdown.classList.remove('open');
+}
+
+function renderModelSelector() {
+  const active = currentConfig.activeModel;
+  const models = Array.isArray(currentConfig.models) ? currentConfig.models : [];
+
+  if (active) {
+    activeProviderBadge.textContent = active.provider;
+    activeProviderBadge.className = `provider-badge ${active.provider}`;
+    activeModelLabel.textContent = active.label;
+    activeVisionBadge.textContent = active.supportsVision ? 'Vision' : 'Text';
+    activeVisionBadge.className = `vision-badge ${active.supportsVision ? 'yes' : 'no'}`;
+  }
+
+  modelDropdown.textContent = '';
+  for (const entry of models) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className =
+      'model-option' + (active && entry.key === active.key ? ' selected' : '');
+
+    const left = document.createElement('span');
+    left.className = 'model-option-left';
+
+    const prov = document.createElement('span');
+    prov.className = `provider-badge ${entry.provider}`;
+    prov.textContent = entry.provider;
+
+    const name = document.createElement('span');
+    name.className = 'model-name';
+    name.textContent = entry.label;
+
+    left.appendChild(prov);
+    left.appendChild(name);
+
+    const vis = document.createElement('span');
+    vis.className = `vision-badge ${entry.supportsVision ? 'yes' : 'no'}`;
+    vis.textContent = entry.supportsVision ? 'Vision' : 'Text';
+
+    btn.appendChild(left);
+    btn.appendChild(vis);
+
+    btn.addEventListener('click', () => {
+      closeModelDropdown();
+      window.metatron.setConfig({ selectedModel: entry.key });
+    });
+
+    modelDropdown.appendChild(btn);
+  }
 }
 
 function applyConfigUI(cfg) {
@@ -63,6 +127,18 @@ function applyConfigUI(cfg) {
     langSelect.appendChild(opt);
   }
   langSelect.value = currentConfig.language;
+
+  renderModelSelector();
+
+  // Clear stale non-vision warning automatically when user switches to a vision-capable model.
+  if (
+    currentConfig.activeModel &&
+    currentConfig.activeModel.supportsVision &&
+    errorBox.textContent.includes("can't read images")
+  ) {
+    clearError();
+    setStatus('', 'Ready');
+  }
 }
 
 function setListeningIndicator(status) {
@@ -129,7 +205,7 @@ function showEmptyChatPlaceholder() {
   const empty = document.createElement('div');
   empty.className = 'chat-empty';
   empty.textContent =
-    '⌘⇧S snap screen · ⌘⇧↩ solve with screenshot · ⌘↩ ask transcript · type below for follow-ups.';
+    '⌘⇧S snap screen · ⌘⇧↩ solve with screenshot · ⌘↩ ask transcript · ⌘⇧P switch model · type below for follow-ups.';
   chatThread.appendChild(empty);
   activeAssistantEl = null;
   activeAssistantBodyEl = null;
@@ -480,6 +556,23 @@ async function handleSttControl({ action, sources = ['me', 'them'] }) {
   }
 }
 
+modelTrigger.addEventListener('click', (event) => {
+  event.stopPropagation();
+  modelDropdown.classList.toggle('open');
+});
+
+document.addEventListener('click', (event) => {
+  if (!modelDropdown.contains(event.target) && !modelTrigger.contains(event.target)) {
+    closeModelDropdown();
+  }
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    closeModelDropdown();
+  }
+});
+
 modeBtn.addEventListener('click', () => {
   const nextMode = currentConfig.mode === 'coding' ? 'meeting' : 'coding';
   window.metatron.setConfig({ mode: nextMode });
@@ -547,8 +640,10 @@ window.metatron.onTranscriptUpdate((payload) => {
 
 window.metatron.onScreenshotUpdate((summary) => {
   if (summary) {
-    clearError();
-    setStatus('', 'Ready');
+    if (currentConfig.activeModel && currentConfig.activeModel.supportsVision) {
+      clearError();
+      setStatus('', 'Ready');
+    }
   }
   renderScreenshot(summary);
 });
@@ -564,8 +659,9 @@ window.metatron.onSttError((message) => {
   setStatus('error', 'Warning');
 });
 
-window.metatron.onStreamStart(({ reset, userLabel, includeScreenshot } = {}) => {
+window.metatron.onStreamStart(({ reset, userLabel, includeScreenshot, modelLabel } = {}) => {
   clearError();
+  closeModelDropdown();
   if (reset) {
     chatThread.textContent = '';
   } else {
@@ -585,6 +681,13 @@ window.metatron.onStreamStart(({ reset, userLabel, includeScreenshot } = {}) => 
 
   const assistantMsg = document.createElement('div');
   assistantMsg.className = 'chat-msg assistant streaming';
+
+  if (modelLabel) {
+    const metaEl = document.createElement('div');
+    metaEl.className = 'assistant-meta';
+    metaEl.textContent = modelLabel;
+    assistantMsg.appendChild(metaEl);
+  }
 
   const bodyEl = document.createElement('div');
   bodyEl.className = 'assistant-body';

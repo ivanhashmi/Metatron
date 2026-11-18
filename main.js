@@ -19,9 +19,36 @@ const { createSttSession } = require('./stt');
 app.setName('Metatron');
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
+const MODELS_PATH = path.join(__dirname, 'models.json');
+
+const DEFAULT_MODELS = [
+  {
+    provider: 'gemini',
+    model: 'gemini-3.5-flash-lite',
+    label: 'Gemini 3.5 Flash-Lite',
+    supportsVision: true,
+    maxOutputTokens: 8192,
+  },
+  {
+    provider: 'groq',
+    model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+    label: 'Groq Llama 4 Scout',
+    supportsVision: true,
+    maxOutputTokens: 8192,
+  },
+  {
+    provider: 'groq',
+    model: 'openai/gpt-oss-120b',
+    label: 'Groq GPT-OSS 120B',
+    supportsVision: false,
+    maxOutputTokens: 8192,
+  },
+];
+
 const DEFAULT_CONFIG = {
   language: 'cpp',
   mode: 'coding',
+  selectedModel: 'gemini:gemini-3.5-flash-lite',
 };
 
 const TRANSCRIPT_RETENTION_MS = 3 * 60 * 1000; // Rolling ~3 minutes displayed
@@ -43,18 +70,20 @@ const MEETING_SYSTEM_PROMPT =
 const VISION_MEETING_SYSTEM_PROMPT =
   'You are a discreet real-time meeting assistant. In the transcript, "Them" is the other party on the call and "Me" is the user. Use both the attached screen capture and the recent transcript (if provided) to give a concise, practical answer or suggest what the user ("Me") should say next in one to three short sentences.';
 
+const NON_VISION_MODEL_ERROR = "This model can't read images. Switch to a vision model";
+
 function buildCodingSystemPrompt(language) {
   const lang = (language || 'cpp').trim() || 'cpp';
   return [
-    `You are an expert software engineering and coding interview assistant.`,
+    'You are an expert software engineering and coding interview assistant.',
     `Default programming language: ${lang} (switch languages immediately if the user asks, e.g. "switch to Java").`,
-    `In any included transcript, "Them" is the interviewer/other party and "Me" is the user.`,
-    `When solving a coding problem (from a screenshot, transcript, or prompt), provide a complete, well-structured solution with:`,
-    `1. **Approach**: clear explanation of the key insight and algorithm.`,
+    'In any included transcript, "Them" is the interviewer/other party and "Me" is the user.',
+    'When solving a coding problem (from a screenshot, transcript, or prompt), provide a complete, well-structured solution with:',
+    '1. **Approach**: clear explanation of the key insight and algorithm.',
     `2. **Code**: complete, runnable, well-commented code inside a fenced code block (e.g. \`\`\`${lang}).`,
-    `3. **Complexity**: time and space complexity.`,
-    `4. **Edge Cases**: important edge cases handled or worth mentioning.`,
-    `For follow-up questions in the conversation (e.g. "optimize it", "explain line 5", "switch to Java"), build directly on the prior turns clearly and include updated code in fenced code blocks whenever relevant.`,
+    '3. **Complexity**: time and space complexity.',
+    '4. **Edge Cases**: important edge cases handled or worth mentioning.',
+    'For follow-up questions in the conversation (e.g. "optimize it", "explain line 5", "switch to Java"), build directly on the prior turns clearly and include updated code in fenced code blocks whenever relevant.',
   ].join('\n');
 }
 
@@ -66,6 +95,7 @@ const SOURCE_LABELS = {
 const SCREEN_PERMISSION_INSTRUCTIONS =
   'Screen Recording permission is not granted (needed for system audio / "Them" and screenshots). Open System Settings → Privacy & Security → Screen & System Audio Recording, enable Electron (or your terminal app), then quit and restart Metatron.';
 
+let modelCatalog = loadModels();
 let appConfig = loadConfig();
 let mainWindow = null;
 let currentAbortController = null;
@@ -98,23 +128,83 @@ const interimBySource = {
 let nextEntryId = 1;
 let pruneTimer = null;
 
+function modelKey(entry) {
+  return `${entry.provider}:${entry.model}`;
+}
+
+function normalizeModelEntry(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const provider = String(raw.provider || '').trim().toLowerCase();
+  const model = String(raw.model || raw.id || '').trim();
+  if (!provider || !model) return null;
+  const label = String(raw.label || model).trim();
+  const supportsVision = Boolean(raw.supportsVision);
+  const maxOutputTokens =
+    typeof raw.maxOutputTokens === 'number' && raw.maxOutputTokens > 0
+      ? raw.maxOutputTokens
+      : CODING_MAX_OUTPUT_TOKENS;
+
+  return {
+    key: `${provider}:${model}`,
+    provider,
+    model,
+    label,
+    supportsVision,
+    maxOutputTokens,
+  };
+}
+
+function loadModels() {
+  try {
+    if (fs.existsSync(MODELS_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(MODELS_PATH, 'utf8'));
+      if (Array.isArray(parsed)) {
+        const normalized = parsed.map(normalizeModelEntry).filter(Boolean);
+        if (normalized.length > 0) {
+          return normalized;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Models] Failed to read models.json, using defaults:', err.message);
+  }
+  return DEFAULT_MODELS.map(normalizeModelEntry);
+}
+
+function getActiveModel() {
+  const found = modelCatalog.find((entry) => entry.key === appConfig.selectedModel);
+  return found || modelCatalog[0];
+}
+
 function loadConfig() {
+  const fallbackSelected = modelCatalog[0] ? modelCatalog[0].key : DEFAULT_CONFIG.selectedModel;
   try {
     if (fs.existsSync(CONFIG_PATH)) {
       const parsed = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      const candidateKey =
+        typeof parsed.selectedModel === 'string' ? parsed.selectedModel.trim() : '';
+      const validSelected = modelCatalog.some((m) => m.key === candidateKey)
+        ? candidateKey
+        : fallbackSelected;
+
       return {
         language:
           typeof parsed.language === 'string' && parsed.language.trim()
             ? parsed.language.trim()
             : DEFAULT_CONFIG.language,
-        mode: parsed.mode === 'meeting' || parsed.mode === 'coding' ? parsed.mode : DEFAULT_CONFIG.mode,
+        mode:
+          parsed.mode === 'meeting' || parsed.mode === 'coding'
+            ? parsed.mode
+            : DEFAULT_CONFIG.mode,
+        selectedModel: validSelected,
       };
     }
   } catch (err) {
     console.warn('[Config] Failed to read config.json, using defaults:', err.message);
   }
-  saveConfig(DEFAULT_CONFIG);
-  return { ...DEFAULT_CONFIG };
+  const initial = { ...DEFAULT_CONFIG, selectedModel: fallbackSelected };
+  saveConfig(initial);
+  return initial;
 }
 
 function saveConfig(nextConfig) {
@@ -125,6 +215,14 @@ function saveConfig(nextConfig) {
   }
 }
 
+function getConfigPayload() {
+  return {
+    ...appConfig,
+    models: modelCatalog,
+    activeModel: getActiveModel(),
+  };
+}
+
 function updateConfig(patch) {
   const next = { ...appConfig };
   if (typeof patch.language === 'string' && patch.language.trim()) {
@@ -133,11 +231,28 @@ function updateConfig(patch) {
   if (patch.mode === 'meeting' || patch.mode === 'coding') {
     next.mode = patch.mode;
   }
+  if (typeof patch.selectedModel === 'string' && patch.selectedModel.trim()) {
+    const requested = patch.selectedModel.trim();
+    if (modelCatalog.some((m) => m.key === requested)) {
+      next.selectedModel = requested;
+    }
+  }
   appConfig = next;
   saveConfig(appConfig);
-  console.log(`[Config] Updated config: mode=${appConfig.mode}, language=${appConfig.language}`);
-  sendToRenderer('config:update', appConfig);
-  return appConfig;
+  const active = getActiveModel();
+  console.log(
+    `[Config] Updated -> mode=${appConfig.mode}, language=${appConfig.language}, model=${active.provider}:${active.model} (vision=${active.supportsVision})`
+  );
+  sendToRenderer('config:update', getConfigPayload());
+  return getConfigPayload();
+}
+
+function cycleModel() {
+  if (modelCatalog.length === 0) return;
+  const currentIndex = modelCatalog.findIndex((m) => m.key === appConfig.selectedModel);
+  const nextIndex = (currentIndex + 1) % modelCatalog.length;
+  const nextModel = modelCatalog[nextIndex];
+  updateConfig({ selectedModel: nextModel.key });
 }
 
 function delay(ms) {
@@ -278,10 +393,10 @@ function resetConversation() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 480,
-    height: 540,
+    width: 490,
+    height: 560,
     minWidth: 360,
-    minHeight: 340,
+    minHeight: 360,
     title: 'Metatron',
     frame: false,
     transparent: true,
@@ -470,6 +585,11 @@ async function capturePrimaryScreenScreenshot() {
       `[Screenshot] Captured primary screen (${imgW}x${imgH}) in ${captureMs}ms (${sizeKb} KB JPEG)`
     );
     broadcastScreenshot();
+
+    const activeModel = getActiveModel();
+    if (activeModel && !activeModel.supportsVision) {
+      sendToRenderer('llm:error', NON_VISION_MODEL_ERROR);
+    }
   } catch (error) {
     const msg =
       error && error.message ? error.message : 'Failed to capture screen screenshot.';
@@ -657,24 +777,29 @@ async function toggleTranscription() {
   }
 }
 
-function getSystemPromptAndTokenLimit({ includeScreenshot, isCodingMode }) {
+function getSystemPromptAndTokenLimit({ includeScreenshot, isCodingMode, activeModel }) {
+  const modelCap =
+    activeModel && typeof activeModel.maxOutputTokens === 'number'
+      ? activeModel.maxOutputTokens
+      : CODING_MAX_OUTPUT_TOKENS;
+
   if (isCodingMode) {
     return {
       systemInstruction: buildCodingSystemPrompt(appConfig.language),
-      maxOutputTokens: CODING_MAX_OUTPUT_TOKENS,
+      maxOutputTokens: Math.min(modelCap, CODING_MAX_OUTPUT_TOKENS),
     };
   }
   return {
     systemInstruction: includeScreenshot ? VISION_MEETING_SYSTEM_PROMPT : MEETING_SYSTEM_PROMPT,
-    maxOutputTokens: MEETING_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: Math.min(modelCap, MEETING_MAX_OUTPUT_TOKENS),
   };
 }
 
 /**
  * Core streaming runner supporting fresh turns (Cmd+Enter / Cmd+Shift+Enter) and
- * multi-turn text follow-ups from the overlay input.
- * Screenshot bytes are ONLY attached on the first turn when explicitly triggered,
- * and NEVER re-sent on follow-up turns.
+ * multi-turn text follow-ups from the overlay input across Gemini and Groq.
+ * Screenshot bytes are ONLY attached on Turn 1 when explicitly triggered and only
+ * when the active model supports vision.
  */
 async function executeConversationTurn({
   reset = false,
@@ -689,6 +814,15 @@ async function executeConversationTurn({
     mainWindow.showInactive();
   }
 
+  const activeModel = getActiveModel();
+  if (imageToSend && !activeModel.supportsVision) {
+    console.warn(
+      `[LLM] Blocked image send on non-vision model ${activeModel.provider}:${activeModel.model}`
+    );
+    sendToRenderer('llm:error', NON_VISION_MODEL_ERROR);
+    return;
+  }
+
   if (currentAbortController) {
     currentAbortController.abort();
   }
@@ -701,11 +835,11 @@ async function executeConversationTurn({
   const controller = new AbortController();
   currentAbortController = controller;
   const requestId = ++activeRequestId;
-  const requestStartMs = Date.now();
   const isCodingMode = appConfig.mode === 'coding';
   const { systemInstruction, maxOutputTokens } = getSystemPromptAndTokenLimit({
     includeScreenshot: Boolean(imageToSend),
     isCodingMode,
+    activeModel,
   });
 
   // Build provider-agnostic text message list from prior turns + current turn.
@@ -716,8 +850,8 @@ async function executeConversationTurn({
 
   const turnNumber = Math.floor(conversationHistory.length / 2) + 1;
   console.log(
-    `[LLM] Turn #${turnNumber} (${modeLabel}, mode=${appConfig.mode}, lang=${appConfig.language}, ` +
-      `history=${conversationHistory.length} prior msgs, ` +
+    `[LLM] Turn #${turnNumber} (${modeLabel}, provider=${activeModel.provider}, model=${activeModel.model}, ` +
+      `mode=${appConfig.mode}, lang=${appConfig.language}, history=${conversationHistory.length} prior msgs, ` +
       (imageToSend
         ? `image=${imageToSend.sizeKb} KB ${imageToSend.width}x${imageToSend.height})`
         : 'image=none)')
@@ -729,27 +863,28 @@ async function executeConversationTurn({
     includeScreenshot: Boolean(imageToSend),
     mode: appConfig.mode,
     language: appConfig.language,
+    modelLabel: activeModel.label,
+    provider: activeModel.provider,
   });
 
   let assistantText = '';
 
   try {
     let receivedAnyChunk = false;
-    let firstTokenMs = null;
 
-    for await (const chunk of streamResponse(requestMessages, {
-      signal: controller.signal,
+    for await (const chunk of streamResponse({
+      provider: activeModel.provider,
+      model: activeModel.model,
+      messages: requestMessages,
       systemInstruction,
       maxOutputTokens,
+      signal: controller.signal,
       image: imageToSend
         ? { mimeType: imageToSend.mimeType, data: imageToSend.buffer }
         : undefined,
     })) {
       if (requestId !== activeRequestId || controller.signal.aborted) {
         return;
-      }
-      if (!receivedAnyChunk) {
-        firstTokenMs = Date.now() - requestStartMs;
       }
       receivedAnyChunk = true;
       assistantText += chunk;
@@ -784,18 +919,12 @@ async function executeConversationTurn({
       broadcastScreenshot();
     }
 
-    const totalMs = Date.now() - requestStartMs;
-    console.log(
-      `[LLM] Completed Turn #${turnNumber} (${modeLabel}, ttft=${firstTokenMs}ms, total=${totalMs}ms, chars=${assistantText.length})`
-    );
     sendToRenderer('llm:end');
   } catch (error) {
     if (requestId !== activeRequestId || controller.signal.aborted) {
       return;
     }
-    const totalMs = Date.now() - requestStartMs;
     const message = error && error.message ? error.message : 'Unexpected error calling LLM.';
-    console.error(`[LLM] Turn #${turnNumber} failed (${modeLabel}, elapsed=${totalMs}ms):`, message);
     sendToRenderer('llm:error', message);
   } finally {
     if (currentAbortController === controller) {
@@ -809,6 +938,12 @@ async function runContextPrompt({ includeScreenshot = false } = {}) {
 
   if (!mainWindow.isVisible()) {
     mainWindow.showInactive();
+  }
+
+  const activeModel = getActiveModel();
+  if (includeScreenshot && !activeModel.supportsVision) {
+    sendToRenderer('llm:error', NON_VISION_MODEL_ERROR);
+    return;
   }
 
   const context = buildTranscriptContext();
@@ -871,6 +1006,11 @@ async function runFollowUpPrompt(rawText) {
   const shouldAttachScreenshot =
     isFirstTurn && Boolean(attachedScreenshot) && !screenshotSentInConversation;
 
+  if (shouldAttachScreenshot && !getActiveModel().supportsVision) {
+    sendToRenderer('llm:error', NON_VISION_MODEL_ERROR);
+    return;
+  }
+
   const recentTranscript = isFirstTurn ? buildTranscriptContext() : '';
   const userPrompt =
     isFirstTurn && recentTranscript
@@ -898,6 +1038,7 @@ function registerShortcuts() {
     ['CommandOrControl+Shift+T', () => toggleTranscription()],
     ['CommandOrControl+Shift+S', () => capturePrimaryScreenScreenshot()],
     ['CommandOrControl+Shift+X', () => clearScreenshot()],
+    ['CommandOrControl+Shift+P', () => cycleModel()],
   ];
 
   for (const [accelerator, handler] of shortcuts) {
@@ -966,8 +1107,9 @@ ipcMain.handle('clipboard:write', (_event, text) => {
   return false;
 });
 
-ipcMain.handle('config:get', () => appConfig);
+ipcMain.handle('config:get', () => getConfigPayload());
 ipcMain.handle('config:set', (_event, patch) => updateConfig(patch || {}));
+ipcMain.on('model:cycle', () => cycleModel());
 
 ipcMain.on('screenshot:capture', () => capturePrimaryScreenScreenshot());
 ipcMain.on('screenshot:clear', () => clearScreenshot());

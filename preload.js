@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('metatron', {
   copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
   getConfig: () => ipcRenderer.invoke('config:get'),
   setConfig: (patch) => ipcRenderer.invoke('config:set', patch),
+  cycleModel: () => ipcRenderer.send('model:cycle'),
   captureScreenshot: () => ipcRenderer.send('screenshot:capture'),
   clearScreenshot: () => ipcRenderer.send('screenshot:clear'),
   getScreenshotState: () => ipcRenderer.invoke('screenshot:get-state'),

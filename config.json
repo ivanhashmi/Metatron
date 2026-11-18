@@ -1,4 +1,5 @@
 {
   "language": "cpp",
-  "mode": "coding"
+  "mode": "coding",
+  "selectedModel": "gemini:gemini-3.5-flash-lite"
 }

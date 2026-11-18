@@ -204,6 +204,150 @@
         background: rgba(255, 255, 255, 0.16);
       }
 
+      /* Top model toggle bar */
+      .model-bar {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 5px 11px;
+        background: rgba(255, 255, 255, 0.03);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+        flex-shrink: 0;
+        -webkit-app-region: no-drag;
+      }
+
+      .model-trigger {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        appearance: none;
+        border: 1px solid rgba(255, 255, 255, 0.11);
+        background: rgba(255, 255, 255, 0.05);
+        color: rgba(244, 246, 250, 0.92);
+        font-size: 11px;
+        font-weight: 500;
+        padding: 3px 8px;
+        border-radius: 7px;
+        cursor: pointer;
+        transition: background 0.12s ease, border-color 0.12s ease;
+      }
+
+      .model-trigger:hover {
+        background: rgba(255, 255, 255, 0.11);
+        border-color: rgba(255, 255, 255, 0.2);
+      }
+
+      .provider-badge {
+        font-size: 9.5px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 1px 5px;
+        border-radius: 4px;
+        flex-shrink: 0;
+      }
+
+      .provider-badge.gemini {
+        background: rgba(56, 189, 248, 0.2);
+        color: #7dd3fc;
+      }
+
+      .provider-badge.groq {
+        background: rgba(251, 146, 60, 0.22);
+        color: #fdba74;
+      }
+
+      .model-name {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .vision-badge {
+        font-size: 9.5px;
+        padding: 1px 5px;
+        border-radius: 4px;
+        flex-shrink: 0;
+      }
+
+      .vision-badge.yes {
+        background: rgba(52, 211, 153, 0.18);
+        color: #6ee7b7;
+      }
+
+      .vision-badge.no {
+        background: rgba(148, 163, 184, 0.16);
+        color: rgba(203, 213, 225, 0.72);
+      }
+
+      .caret {
+        font-size: 9px;
+        opacity: 0.65;
+      }
+
+      .model-cycle-hint {
+        font-size: 10px;
+        color: rgba(148, 163, 184, 0.72);
+        user-select: none;
+        flex-shrink: 0;
+      }
+
+      .model-dropdown {
+        display: none;
+        position: absolute;
+        top: calc(100% + 2px);
+        left: 11px;
+        right: 11px;
+        z-index: 40;
+        background: rgba(19, 22, 31, 0.98);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 9px;
+        padding: 4px;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55);
+      }
+
+      .model-dropdown.open {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .model-option {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        width: 100%;
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: rgba(241, 245, 249, 0.9);
+        font-size: 11.5px;
+        text-align: left;
+        padding: 6px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: background 0.1s ease;
+      }
+
+      .model-option:hover {
+        background: rgba(255, 255, 255, 0.09);
+      }
+
+      .model-option.selected {
+        background: rgba(59, 130, 246, 0.22);
+      }
+
+      .model-option-left {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+
       .body {
         flex: 1;
         min-height: 0;
@@ -302,7 +446,7 @@
 
       .section-transcript {
         flex: 1 1 0;
-        min-height: 76px;
+        min-height: 74px;
       }
 
       .section-header {
@@ -391,6 +535,12 @@
         line-height: 1.5;
         color: rgba(248, 250, 252, 0.95);
         word-break: break-word;
+      }
+
+      .assistant-meta {
+        font-size: 10px;
+        color: rgba(148, 163, 184, 0.72);
+        user-select: none;
       }
 
       .chat-msg.assistant.streaming .assistant-body::after {
@@ -670,6 +820,22 @@
         </div>
       </header>
 
+      <div class="model-bar">
+        <button
+          id="model-trigger"
+          class="model-trigger"
+          type="button"
+          title="Click to pick a model or press ⌘⇧P to cycle"
+        >
+          <span id="active-provider-badge" class="provider-badge gemini">gemini</span>
+          <span id="active-model-label" class="model-name">Loading model…</span>
+          <span id="active-vision-badge" class="vision-badge yes">Vision</span>
+          <span class="caret">▾</span>
+        </button>
+        <span class="model-cycle-hint"><kbd>⌘⇧P</kbd> switch</span>
+        <div id="model-dropdown" class="model-dropdown" role="listbox"></div>
+      </div>
+
       <main class="body">
         <div id="error-box" class="error-box" role="alert"></div>
 
@@ -709,8 +875,8 @@
           <div id="chat-scroll" class="scroll-area">
             <div id="chat-thread" class="chat-thread">
               <div class="chat-empty">
-                ⌘⇧S snap screen · ⌘⇧↩ solve with screenshot · ⌘↩ ask transcript · type below for
-                follow-ups.
+                ⌘⇧S snap screen · ⌘⇧↩ solve with screenshot · ⌘↩ ask transcript · ⌘⇧P switch model ·
+                type below for follow-ups.
               </div>
             </div>
           </div>
@@ -745,7 +911,7 @@
           <span><kbd>⌘⇧S</kbd> Snap</span>
           <span><kbd>⌘↩</kbd> Ask</span>
           <span><kbd>⌘⇧↩</kbd> +Img</span>
-          <span><kbd>⌘⇧X</kbd> Clear Img</span>
+          <span><kbd>⌘⇧X</kbd> Clear</span>
         </div>
         <span id="status-text">Ready</span>
       </footer>

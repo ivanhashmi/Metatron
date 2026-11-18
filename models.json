@@ -1,0 +1,37 @@
+[
+  {
+    "provider": "gemini",
+    "model": "gemini-3.5-flash-lite",
+    "label": "Gemini 3.5 Flash-Lite",
+    "supportsVision": true,
+    "maxOutputTokens": 8192
+  },
+  {
+    "provider": "gemini",
+    "model": "gemini-3.8-flash",
+    "label": "Gemini 3.8 Flash",
+    "supportsVision": true,
+    "maxOutputTokens": 8192
+  },
+  {
+    "provider": "groq",
+    "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+    "label": "Groq Llama 4 Scout",
+    "supportsVision": true,
+    "maxOutputTokens": 8192
+  },
+  {
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "label": "Groq GPT-OSS 120B",
+    "supportsVision": false,
+    "maxOutputTokens": 8192
+  },
+  {
+    "provider": "groq",
+    "model": "openai/gpt-oss-20b",
+    "label": "Groq GPT-OSS 20B",
+    "supportsVision": false,
+    "maxOutputTokens": 8192
+  }
+]
