@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('metatron', {
   clearScreenshot: () => ipcRenderer.send('screenshot:clear'),
   getScreenshotState: () => ipcRenderer.invoke('screenshot:get-state'),
   toggleListening: () => ipcRenderer.send('stt:toggle'),
+  toggleClickThrough: () => ipcRenderer.send('overlay:toggle-click-through'),
+  getClickThrough: () => ipcRenderer.invoke('overlay:get-click-through'),
   sendAudioChunk: (source, pcmBytes, rms) =>
     ipcRenderer.send('stt:audio-chunk', source, pcmBytes, rms),
   reportCaptureError: (source, message) =>
@@ -36,4 +38,5 @@ contextBridge.exposeInMainWorld('metatron', {
   onTranscriptUpdate: (callback) => subscribe('stt:transcript', callback),
   onSttError: (callback) => subscribe('stt:error', callback),
   onScreenshotUpdate: (callback) => subscribe('screenshot:update', callback),
+  onClickThroughChange: (callback) => subscribe('overlay:click-through', callback),
 });

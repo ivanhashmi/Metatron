@@ -9,6 +9,7 @@ const {
   desktopCapturer,
   globalShortcut,
   ipcMain,
+  Menu,
   screen,
   session,
   systemPreferences,
@@ -17,6 +18,11 @@ const { streamResponse } = require('./llm');
 const { createSttSession } = require('./stt');
 
 app.setName('Metatron');
+
+// macOS: Hide from Dock and Cmd+Tab switcher so the overlay behaves as a true stealth utility.
+if (process.platform === 'darwin' && app.dock) {
+  app.dock.hide();
+}
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const MODELS_PATH = path.join(__dirname, 'models.json');
@@ -113,6 +119,7 @@ const sourceStates = {
 let isListening = false;
 let isStartingTranscription = false;
 let isCapturingScreenshot = false;
+let isClickThrough = false;
 
 let attachedScreenshot = null; // { buffer, mimeType, width, height, sizeKb, capturedAt, thumbnailDataUrl }
 
@@ -402,6 +409,37 @@ function resetConversation() {
   console.log('[LLM] Cleared conversation history');
 }
 
+function setupApplicationMenu() {
+  if (process.platform !== 'darwin') return;
+  const template = [
+    {
+      label: 'Metatron',
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 490,
@@ -417,6 +455,8 @@ function createWindow() {
     resizable: true,
     fullscreenable: false,
     skipTaskbar: true,
+    type: 'panel', // macOS: NSPanel (non-activating floating utility window)
+    hiddenInMissionControl: true, // macOS: exclude from Mission Control & Exposé thumbnails
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -427,16 +467,24 @@ function createWindow() {
 
   // Stay visible over other apps (including fullscreen apps) and across all macOS Spaces.
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  mainWindow.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: true,
+    skipTransformProcessType: true,
+  });
 
   // Best-effort screen-capture protection (configurable via config.json `contentProtection`).
   mainWindow.setContentProtection(Boolean(appConfig.contentProtection));
   console.log(`[Window] setContentProtection(${Boolean(appConfig.contentProtection)})`);
 
+  if (isClickThrough) {
+    mainWindow.setIgnoreMouseEvents(true, { forward: true });
+  }
+
   mainWindow.loadFile(path.join(__dirname, 'renderer.html'));
 
   mainWindow.webContents.on('did-finish-load', () => {
     checkScreenPermissionOnStartup();
+    sendToRenderer('overlay:click-through', isClickThrough);
   });
 
   mainWindow.on('closed', () => {
@@ -455,8 +503,16 @@ function toggleWindow() {
   if (mainWindow.isVisible()) {
     mainWindow.hide();
   } else {
-    mainWindow.show();
+    mainWindow.showInactive();
   }
+}
+
+function toggleClickThrough() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  isClickThrough = !isClickThrough;
+  mainWindow.setIgnoreMouseEvents(isClickThrough, { forward: true });
+  sendToRenderer('overlay:click-through', isClickThrough);
+  console.log(`[Window] Click-through mode: ${isClickThrough ? 'ON' : 'OFF'}`);
 }
 
 function getScreenPermissionStatus() {
@@ -1054,6 +1110,7 @@ function registerShortcuts() {
     ['CommandOrControl+Shift+S', () => capturePrimaryScreenScreenshot()],
     ['CommandOrControl+Shift+X', () => clearScreenshot()],
     ['CommandOrControl+Shift+P', () => cycleModel()],
+    ['CommandOrControl+Shift+M', () => toggleClickThrough()],
   ];
 
   for (const [accelerator, handler] of shortcuts) {
@@ -1108,6 +1165,8 @@ ipcMain.on('overlay:ask', () => runContextPrompt({ includeScreenshot: false }));
 ipcMain.on('overlay:ask-with-screenshot', () => runContextPrompt({ includeScreenshot: true }));
 ipcMain.on('overlay:followup', (_event, text) => runFollowUpPrompt(text));
 ipcMain.on('overlay:clear-chat', () => resetConversation());
+ipcMain.on('overlay:toggle-click-through', () => toggleClickThrough());
+ipcMain.handle('overlay:get-click-through', () => isClickThrough);
 ipcMain.on('overlay:hide', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.hide();
@@ -1164,6 +1223,7 @@ ipcMain.handle('stt:get-state', () => ({
 }));
 
 app.whenReady().then(() => {
+  setupApplicationMenu();
   configureMediaPermissions();
   createWindow();
   registerShortcuts();
@@ -1178,7 +1238,7 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     } else if (mainWindow && !mainWindow.isVisible()) {
-      mainWindow.show();
+      mainWindow.showInactive();
     }
   });
 });

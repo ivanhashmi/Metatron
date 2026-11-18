@@ -25,6 +25,7 @@ const chatThread = document.getElementById('chat-thread');
 const transcriptList = document.getElementById('transcript-list');
 const transcriptScroll = document.getElementById('transcript-scroll');
 const transcribingIndicator = document.getElementById('transcribing-indicator');
+const clickthruBadge = document.getElementById('clickthru-badge');
 const followupForm = document.getElementById('followup-form');
 const followupInput = document.getElementById('followup-input');
 
@@ -627,6 +628,20 @@ followupForm.addEventListener('submit', (event) => {
 
 window.metatron.getConfig().then(applyConfigUI);
 window.metatron.onConfigUpdate(applyConfigUI);
+
+if (window.metatron.getClickThrough) {
+  window.metatron.getClickThrough().then((active) => {
+    if (clickthruBadge) {
+      clickthruBadge.classList.toggle('active', Boolean(active));
+    }
+  });
+}
+
+window.metatron.onClickThroughChange((active) => {
+  if (clickthruBadge) {
+    clickthruBadge.classList.toggle('active', Boolean(active));
+  }
+});
 
 window.metatron.getSttState().then((state) => {
   setListeningIndicator(state.status);

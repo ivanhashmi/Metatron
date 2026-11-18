@@ -21,7 +21,8 @@ A minimal macOS meeting & coding assistant overlay built with Electron, Deepgram
   - **Them** (system audio loopback via `setDisplayMediaRequestHandler` + `getDisplayMedia` with video track discarded + dedicated `AudioWorklet`, 16-bit PCM @ 16 kHz mono)
   - Separate Deepgram `nova-3` WebSocket connections per source with independent `KeepAlive` and exponential-backoff reconnection.
 - **Global shortcuts**:
-  - `Cmd+Shift+Space`: Toggle showing/hiding the overlay.
+  - `Cmd+Shift+Space`: Toggle showing/hiding the overlay without stealing focus (`showInactive`).
+  - `Cmd+Shift+M`: Toggle click-through mode (clicks pass straight through to background windows/code, with visual badge).
   - `Cmd+Shift+P`: Cycle through configured models in `models.json`.
   - `Cmd+Shift+T`: Start/stop both microphone and system audio transcription together.
   - `Cmd+Enter`: Send the last ~2 minutes of labeled (`Me` / `Them`) transcript (never sends screenshots automatically).
@@ -61,10 +62,18 @@ A minimal macOS meeting & coding assistant overlay built with Electron, Deepgram
 
 3. *(Optional)* Edit `models.json` to add/remove/reorder Gemini or Groq models without touching code, or customize `config.json` (`language`, `mode`, `selectedModel`, `contentProtection`).
 
-## Screen Sharing & Content Protection
+## Screen Sharing & Stealth Architecture
 
-- Metatron calls `mainWindow.setContentProtection(true)` by default (controlled via `"contentProtection": true` in `config.json`; set it to `false` to disable).
-- **Note:** `setContentProtection` is **best-effort on macOS** — whether an overlay is hidden from a full-screen capture depends on the macOS version and the screen-sharing app's capture API. Sharing a **single application window or browser tab** (rather than your entire desktop) is the reliable way to keep the overlay off a screen share.
+- **Tier 1 Stealth Protections**:
+  - `app.dock.hide()`: Removes Metatron from the macOS Dock and `Cmd+Tab` app switcher.
+  - Non-activating `NSPanel` (`type: 'panel'`): Stays floating over fullscreen apps and Spaces without triggering OS workspace changes.
+  - Excluded from Mission Control (`hiddenInMissionControl: true`): Prevents the window from appearing in Exposé or Mission Control space previews.
+  - Non-activating visibility (`showInactive()`): Toggling or showing the overlay never steals window focus from your active code editor, browser, or meeting.
+  - Click-through mode (`Cmd+Shift+M`): Pass mouse events directly to the background app with `setIgnoreMouseEvents(true, { forward: true })`.
+  - Registered Edit menu: Keeps standard clipboard shortcuts (`Cmd+C`, `Cmd+V`, `Cmd+A`, `Cmd+Z`, `Cmd+Q`) functional even with a hidden Dock.
+- **Content Protection**:
+  - Calls `mainWindow.setContentProtection(true)` by default (controlled via `"contentProtection": true` in `config.json`; set to `false` to disable).
+  - **Note:** `setContentProtection` is **best-effort on macOS** — whether an overlay is hidden from a full-screen capture depends on the macOS version and the screen-sharing app's capture API. Sharing a **single application window or browser tab** (rather than your entire desktop) is the reliable way to keep the overlay off a screen share.
 - Whenever microphone or system audio capture is active, a small pulsing **Transcribing** indicator is shown in the overlay's Live Transcript header.
 
 ## Run
