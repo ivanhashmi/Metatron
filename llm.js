@@ -53,7 +53,7 @@ function formatProviderError(error) {
     return 'Invalid Gemini API key. Check GEMINI_API_KEY in your .env file and restart Metatron.';
   }
   if (isTransientUnavailableError(error)) {
-    return 'Gemini is temporarily experiencing high demand (503). Press ⌘↩ to try again in a moment.';
+    return 'Gemini is temporarily experiencing high demand (503). Try again in a moment.';
   }
   if (/quota|rate limit|RESOURCE_EXHAUSTED|429/i.test(raw)) {
     return 'Gemini API rate limit or quota exceeded. Wait a moment and try again.';
@@ -91,36 +91,53 @@ function getCandidateModels() {
   return [...new Set(list)];
 }
 
-function buildGeminiContents(prompt, image) {
-  if (!image || !image.data) {
-    return prompt;
+/**
+ * Convert provider-agnostic messages + optional turn-1 image into Gemini Content[].
+ * @param {string | Array<{ role: 'user' | 'assistant', text: string }>} input
+ * @param {{ mimeType: string, data: Buffer | string } | undefined} image
+ */
+function buildGeminiContents(input, image) {
+  const normalizedMessages = Array.isArray(input)
+    ? input
+    : [{ role: 'user', text: String(input || '') }];
+
+  const contents = normalizedMessages.map((msg) => ({
+    role: msg.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: String(msg.text || '') }],
+  }));
+
+  if (image && image.data && contents.length > 0) {
+    const base64Data = Buffer.isBuffer(image.data)
+      ? image.data.toString('base64')
+      : String(image.data);
+
+    // Attach image inlineData only to the target user turn (never stored in history).
+    for (let i = contents.length - 1; i >= 0; i--) {
+      if (contents[i].role === 'user') {
+        contents[i].parts.push({
+          inlineData: {
+            mimeType: image.mimeType || 'image/jpeg',
+            data: base64Data,
+          },
+        });
+        break;
+      }
+    }
   }
 
-  const base64Data = Buffer.isBuffer(image.data)
-    ? image.data.toString('base64')
-    : String(image.data);
-
-  return [
-    { text: prompt },
-    {
-      inlineData: {
-        mimeType: image.mimeType || 'image/jpeg',
-        data: base64Data,
-      },
-    },
-  ];
+  return contents;
 }
 
 /**
- * Gemini provider implementation (text and multimodal vision).
+ * Gemini provider implementation (single-turn, multi-turn, and multimodal vision).
  * To add another provider (e.g. Groq), implement an object with the same
- * `async *stream(prompt, { signal, systemInstruction, image })` method and
- * swap `activeProvider` below.
+ * `async *stream(input, { signal, systemInstruction, image, maxOutputTokens })`
+ * method and swap `activeProvider` below.
  */
 const geminiProvider = {
   name: 'gemini',
 
-  async *stream(prompt, { signal, systemInstruction, image } = {}) {
+  async *stream(input, { signal, systemInstruction, image, maxOutputTokens } = {}) {
     const apiKey = (process.env.GEMINI_API_KEY || '').trim();
     if (!apiKey || apiKey === 'your_gemini_api_key_here') {
       throw new Error(
@@ -131,7 +148,7 @@ const geminiProvider = {
     const ai = new GoogleGenAI({ apiKey });
     const models = getCandidateModels();
     const instruction = systemInstruction || SYSTEM_INSTRUCTION;
-    const contents = buildGeminiContents(prompt, image);
+    const contents = buildGeminiContents(input, image);
     const hasImage = Boolean(image && image.data);
     let lastError = null;
 
@@ -144,15 +161,21 @@ const geminiProvider = {
         let yieldedAnyChunk = false;
         try {
           console.log(
-            `[LLM:gemini] Calling model=${model} (vision=${hasImage}, attempt=${attempt + 1})`
+            `[LLM:gemini] Calling model=${model} (turns=${contents.length}, vision=${hasImage}, maxTokens=${maxOutputTokens || 'default'}, attempt=${attempt + 1})`
           );
+
+          const config = {
+            systemInstruction: instruction,
+            abortSignal: signal,
+          };
+          if (typeof maxOutputTokens === 'number' && maxOutputTokens > 0) {
+            config.maxOutputTokens = maxOutputTokens;
+          }
+
           const responseStream = await ai.models.generateContentStream({
             model,
             contents,
-            config: {
-              systemInstruction: instruction,
-              abortSignal: signal,
-            },
+            config,
           });
 
           for await (const chunk of responseStream) {
@@ -213,12 +236,12 @@ const activeProvider = geminiProvider;
 
 /**
  * Stream completion text chunks from the active LLM provider.
- * @param {string} prompt
- * @param {{ signal?: AbortSignal, systemInstruction?: string, image?: { mimeType: string, data: Buffer | string } }} [options]
+ * @param {string | Array<{ role: 'user' | 'assistant', text: string }>} input
+ * @param {{ signal?: AbortSignal, systemInstruction?: string, image?: { mimeType: string, data: Buffer | string }, maxOutputTokens?: number }} [options]
  * @returns {AsyncGenerator<string, void, unknown>}
  */
-async function* streamResponse(prompt, options = {}) {
-  yield* activeProvider.stream(prompt, options);
+async function* streamResponse(input, options = {}) {
+  yield* activeProvider.stream(input, options);
 }
 
 module.exports = {

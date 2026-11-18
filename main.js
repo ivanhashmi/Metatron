@@ -1,9 +1,11 @@
+const fs = require('fs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const {
   app,
   BrowserWindow,
+  clipboard,
   desktopCapturer,
   globalShortcut,
   ipcMain,
@@ -16,6 +18,12 @@ const { createSttSession } = require('./stt');
 
 app.setName('Metatron');
 
+const CONFIG_PATH = path.join(__dirname, 'config.json');
+const DEFAULT_CONFIG = {
+  language: 'cpp',
+  mode: 'coding',
+};
+
 const TRANSCRIPT_RETENTION_MS = 3 * 60 * 1000; // Rolling ~3 minutes displayed
 const LLM_CONTEXT_WINDOW_MS = 2 * 60 * 1000; // Last ~2 minutes sent to LLM
 const PRUNE_INTERVAL_MS = 15 * 1000;
@@ -25,11 +33,30 @@ const SCREENSHOT_JPEG_QUALITY = 75;
 const SCREENSHOT_THUMB_WIDTH_PX = 160;
 const OVERLAY_HIDE_SETTLE_MS = 80;
 
+const CODING_MAX_OUTPUT_TOKENS = 8192;
+const MEETING_MAX_OUTPUT_TOKENS = 1024;
+const MAX_HISTORY_MESSAGES = 20;
+
 const MEETING_SYSTEM_PROMPT =
   'You are a discreet real-time meeting assistant. In the transcript, "Them" is the other party on the call and "Me" is the user. Suggest what the user ("Me") should say next, in one or two concise sentences.';
 
 const VISION_MEETING_SYSTEM_PROMPT =
   'You are a discreet real-time meeting assistant. In the transcript, "Them" is the other party on the call and "Me" is the user. Use both the attached screen capture and the recent transcript (if provided) to give a concise, practical answer or suggest what the user ("Me") should say next in one to three short sentences.';
+
+function buildCodingSystemPrompt(language) {
+  const lang = (language || 'cpp').trim() || 'cpp';
+  return [
+    `You are an expert software engineering and coding interview assistant.`,
+    `Default programming language: ${lang} (switch languages immediately if the user asks, e.g. "switch to Java").`,
+    `In any included transcript, "Them" is the interviewer/other party and "Me" is the user.`,
+    `When solving a coding problem (from a screenshot, transcript, or prompt), provide a complete, well-structured solution with:`,
+    `1. **Approach**: clear explanation of the key insight and algorithm.`,
+    `2. **Code**: complete, runnable, well-commented code inside a fenced code block (e.g. \`\`\`${lang}).`,
+    `3. **Complexity**: time and space complexity.`,
+    `4. **Edge Cases**: important edge cases handled or worth mentioning.`,
+    `For follow-up questions in the conversation (e.g. "optimize it", "explain line 5", "switch to Java"), build directly on the prior turns clearly and include updated code in fenced code blocks whenever relevant.`,
+  ].join('\n');
+}
 
 const SOURCE_LABELS = {
   me: 'Me',
@@ -39,6 +66,7 @@ const SOURCE_LABELS = {
 const SCREEN_PERMISSION_INSTRUCTIONS =
   'Screen Recording permission is not granted (needed for system audio / "Them" and screenshots). Open System Settings → Privacy & Security → Screen & System Audio Recording, enable Electron (or your terminal app), then quit and restart Metatron.';
 
+let appConfig = loadConfig();
 let mainWindow = null;
 let currentAbortController = null;
 let activeRequestId = 0;
@@ -57,6 +85,11 @@ let isCapturingScreenshot = false;
 
 let attachedScreenshot = null; // { buffer, mimeType, width, height, sizeKb, capturedAt, thumbnailDataUrl }
 
+// Multi-turn text-only conversation history (screenshot bytes are NEVER stored here so
+// follow-up turns remain fast and cheap).
+let conversationHistory = []; // Array<{ role: 'user' | 'assistant', text: string, displayLabel?: string, hadImage?: boolean }>
+let screenshotSentInConversation = false;
+
 let transcriptEntries = []; // { id, source, label, text, timestamp }
 const interimBySource = {
   me: null, // { source, label, text, timestamp } | null
@@ -64,6 +97,48 @@ const interimBySource = {
 };
 let nextEntryId = 1;
 let pruneTimer = null;
+
+function loadConfig() {
+  try {
+    if (fs.existsSync(CONFIG_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      return {
+        language:
+          typeof parsed.language === 'string' && parsed.language.trim()
+            ? parsed.language.trim()
+            : DEFAULT_CONFIG.language,
+        mode: parsed.mode === 'meeting' || parsed.mode === 'coding' ? parsed.mode : DEFAULT_CONFIG.mode,
+      };
+    }
+  } catch (err) {
+    console.warn('[Config] Failed to read config.json, using defaults:', err.message);
+  }
+  saveConfig(DEFAULT_CONFIG);
+  return { ...DEFAULT_CONFIG };
+}
+
+function saveConfig(nextConfig) {
+  try {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(nextConfig, null, 2) + '\n', 'utf8');
+  } catch (err) {
+    console.warn('[Config] Failed to write config.json:', err.message);
+  }
+}
+
+function updateConfig(patch) {
+  const next = { ...appConfig };
+  if (typeof patch.language === 'string' && patch.language.trim()) {
+    next.language = patch.language.trim();
+  }
+  if (patch.mode === 'meeting' || patch.mode === 'coding') {
+    next.mode = patch.mode;
+  }
+  appConfig = next;
+  saveConfig(appConfig);
+  console.log(`[Config] Updated config: mode=${appConfig.mode}, language=${appConfig.language}`);
+  sendToRenderer('config:update', appConfig);
+  return appConfig;
+}
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -108,6 +183,7 @@ function getScreenshotSummary() {
     sizeKb: attachedScreenshot.sizeKb,
     time: formatTimestamp(attachedScreenshot.capturedAt),
     thumbnailDataUrl: attachedScreenshot.thumbnailDataUrl,
+    sentInConversation: screenshotSentInConversation,
   };
 }
 
@@ -187,12 +263,25 @@ function buildTranscriptContext() {
   return combined.map((item) => item.line).join('\n').trim();
 }
 
+function resetConversation() {
+  if (currentAbortController) {
+    currentAbortController.abort();
+    currentAbortController = null;
+  }
+  activeRequestId++;
+  conversationHistory = [];
+  screenshotSentInConversation = false;
+  broadcastScreenshot();
+  sendToRenderer('chat:reset');
+  console.log('[LLM] Cleared conversation history');
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 440,
-    height: 430,
-    minWidth: 340,
-    minHeight: 280,
+    width: 480,
+    height: 540,
+    minWidth: 360,
+    minHeight: 340,
     title: 'Metatron',
     frame: false,
     transparent: true,
@@ -375,6 +464,7 @@ async function capturePrimaryScreenScreenshot() {
       capturedAt: Date.now(),
       thumbnailDataUrl,
     };
+    screenshotSentInConversation = false;
 
     console.log(
       `[Screenshot] Captured primary screen (${imgW}x${imgH}) in ${captureMs}ms (${sizeKb} KB JPEG)`
@@ -396,6 +486,7 @@ async function capturePrimaryScreenScreenshot() {
 function clearScreenshot() {
   if (!attachedScreenshot) return;
   attachedScreenshot = null;
+  screenshotSentInConversation = false;
   console.log('[Screenshot] Cleared attached screenshot');
   broadcastScreenshot();
 }
@@ -566,6 +657,153 @@ async function toggleTranscription() {
   }
 }
 
+function getSystemPromptAndTokenLimit({ includeScreenshot, isCodingMode }) {
+  if (isCodingMode) {
+    return {
+      systemInstruction: buildCodingSystemPrompt(appConfig.language),
+      maxOutputTokens: CODING_MAX_OUTPUT_TOKENS,
+    };
+  }
+  return {
+    systemInstruction: includeScreenshot ? VISION_MEETING_SYSTEM_PROMPT : MEETING_SYSTEM_PROMPT,
+    maxOutputTokens: MEETING_MAX_OUTPUT_TOKENS,
+  };
+}
+
+/**
+ * Core streaming runner supporting fresh turns (Cmd+Enter / Cmd+Shift+Enter) and
+ * multi-turn text follow-ups from the overlay input.
+ * Screenshot bytes are ONLY attached on the first turn when explicitly triggered,
+ * and NEVER re-sent on follow-up turns.
+ */
+async function executeConversationTurn({
+  reset = false,
+  userPrompt,
+  displayLabel,
+  imageToSend = null,
+  modeLabel = 'turn',
+}) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  if (!mainWindow.isVisible()) {
+    mainWindow.showInactive();
+  }
+
+  if (currentAbortController) {
+    currentAbortController.abort();
+  }
+
+  if (reset) {
+    conversationHistory = [];
+    screenshotSentInConversation = false;
+  }
+
+  const controller = new AbortController();
+  currentAbortController = controller;
+  const requestId = ++activeRequestId;
+  const requestStartMs = Date.now();
+  const isCodingMode = appConfig.mode === 'coding';
+  const { systemInstruction, maxOutputTokens } = getSystemPromptAndTokenLimit({
+    includeScreenshot: Boolean(imageToSend),
+    isCodingMode,
+  });
+
+  // Build provider-agnostic text message list from prior turns + current turn.
+  const requestMessages = [
+    ...conversationHistory.map(({ role, text }) => ({ role, text })),
+    { role: 'user', text: userPrompt },
+  ];
+
+  const turnNumber = Math.floor(conversationHistory.length / 2) + 1;
+  console.log(
+    `[LLM] Turn #${turnNumber} (${modeLabel}, mode=${appConfig.mode}, lang=${appConfig.language}, ` +
+      `history=${conversationHistory.length} prior msgs, ` +
+      (imageToSend
+        ? `image=${imageToSend.sizeKb} KB ${imageToSend.width}x${imageToSend.height})`
+        : 'image=none)')
+  );
+
+  sendToRenderer('llm:start', {
+    reset,
+    userLabel: displayLabel,
+    includeScreenshot: Boolean(imageToSend),
+    mode: appConfig.mode,
+    language: appConfig.language,
+  });
+
+  let assistantText = '';
+
+  try {
+    let receivedAnyChunk = false;
+    let firstTokenMs = null;
+
+    for await (const chunk of streamResponse(requestMessages, {
+      signal: controller.signal,
+      systemInstruction,
+      maxOutputTokens,
+      image: imageToSend
+        ? { mimeType: imageToSend.mimeType, data: imageToSend.buffer }
+        : undefined,
+    })) {
+      if (requestId !== activeRequestId || controller.signal.aborted) {
+        return;
+      }
+      if (!receivedAnyChunk) {
+        firstTokenMs = Date.now() - requestStartMs;
+      }
+      receivedAnyChunk = true;
+      assistantText += chunk;
+      sendToRenderer('llm:chunk', chunk);
+    }
+
+    if (requestId !== activeRequestId || controller.signal.aborted) {
+      return;
+    }
+
+    if (!receivedAnyChunk) {
+      sendToRenderer('llm:error', 'The model returned an empty response. Try again.');
+      return;
+    }
+
+    // Persist ONLY text in conversationHistory so follow-ups never re-send image bytes.
+    const storedUserText = imageToSend
+      ? `${userPrompt}\n\n[Note: A screenshot was attached and analyzed on this first turn; refer to your analysis above for follow-ups.]`
+      : userPrompt;
+
+    conversationHistory.push(
+      { role: 'user', text: storedUserText, displayLabel, hadImage: Boolean(imageToSend) },
+      { role: 'assistant', text: assistantText }
+    );
+
+    if (conversationHistory.length > MAX_HISTORY_MESSAGES) {
+      conversationHistory = conversationHistory.slice(-MAX_HISTORY_MESSAGES);
+    }
+
+    if (imageToSend) {
+      screenshotSentInConversation = true;
+      broadcastScreenshot();
+    }
+
+    const totalMs = Date.now() - requestStartMs;
+    console.log(
+      `[LLM] Completed Turn #${turnNumber} (${modeLabel}, ttft=${firstTokenMs}ms, total=${totalMs}ms, chars=${assistantText.length})`
+    );
+    sendToRenderer('llm:end');
+  } catch (error) {
+    if (requestId !== activeRequestId || controller.signal.aborted) {
+      return;
+    }
+    const totalMs = Date.now() - requestStartMs;
+    const message = error && error.message ? error.message : 'Unexpected error calling LLM.';
+    console.error(`[LLM] Turn #${turnNumber} failed (${modeLabel}, elapsed=${totalMs}ms):`, message);
+    sendToRenderer('llm:error', message);
+  } finally {
+    if (currentAbortController === controller) {
+      currentAbortController = null;
+    }
+  }
+}
+
 async function runContextPrompt({ includeScreenshot = false } = {}) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
@@ -587,85 +825,69 @@ async function runContextPrompt({ includeScreenshot = false } = {}) {
   if (!includeScreenshot && !context) {
     sendToRenderer(
       'llm:error',
-      'No transcript in the last 2 minutes yet. Press ⌘⇧T to start listening first.'
+      'No transcript in the last 2 minutes yet. Press ⌘⇧T to start listening first, or type a message below.'
     );
     return;
   }
 
-  if (currentAbortController) {
-    currentAbortController.abort();
+  const isCodingMode = appConfig.mode === 'coding';
+  let userPrompt;
+  let displayLabel;
+
+  if (includeScreenshot) {
+    displayLabel = context ? 'Screenshot + Transcript (⌘⇧↩)' : 'Screenshot (⌘⇧↩)';
+    if (isCodingMode) {
+      userPrompt = context
+        ? `Recent transcript (last ~2 minutes):\n${context}\n\nSolve the coding problem shown in the attached screenshot in ${appConfig.language}. Include Approach, complete commented Code, Complexity, and Edge Cases.`
+        : `Solve the coding problem shown in the attached screenshot in ${appConfig.language}. Include Approach, complete commented Code, Complexity, and Edge Cases.`;
+    } else {
+      userPrompt = context
+        ? `Recent meeting transcript (last ~2 minutes):\n${context}\n\nUsing the attached screenshot and the transcript above, what should I ("Me") say next?`
+        : 'No recent transcript is available yet. Look at the attached screenshot and briefly tell me what is most relevant or what I ("Me") should say next.';
+    }
+  } else {
+    displayLabel = 'Transcript (⌘↩)';
+    userPrompt = isCodingMode
+      ? `Recent transcript (last ~2 minutes):\n${context}\n\nProvide a clear coding answer/solution in ${appConfig.language} based on the discussion above.`
+      : `Recent meeting transcript (last ~2 minutes):\n${context}\n\nWhat should I ("Me") say next?`;
   }
 
-  const controller = new AbortController();
-  currentAbortController = controller;
-  const requestId = ++activeRequestId;
-  const requestStartMs = Date.now();
-  const mode = includeScreenshot ? 'vision+transcript' : 'transcript-only';
+  await executeConversationTurn({
+    reset: true,
+    userPrompt,
+    displayLabel,
+    imageToSend: screenshot,
+    modeLabel: includeScreenshot ? 'vision+transcript' : 'transcript-only',
+  });
+}
 
-  const prompt = includeScreenshot
-    ? context
-      ? `Recent meeting transcript (last ~2 minutes):\n${context}\n\nUsing the attached screenshot and the transcript above, what should I ("Me") say next?`
-      : 'No recent transcript is available yet. Look at the attached screenshot and briefly tell me what is most relevant or what I ("Me") should say next.'
-    : `Recent meeting transcript (last ~2 minutes):\n${context}\n\nWhat should I ("Me") say next?`;
+async function runFollowUpPrompt(rawText) {
+  const text = typeof rawText === 'string' ? rawText.trim() : '';
+  if (!text) return;
 
-  const systemInstruction = includeScreenshot
-    ? VISION_MEETING_SYSTEM_PROMPT
-    : MEETING_SYSTEM_PROMPT;
+  // Send the attached screenshot ONLY if this is the very first turn of a conversation
+  // and the screenshot has not been sent yet. Follow-ups NEVER re-send the screenshot.
+  const isFirstTurn = conversationHistory.length === 0;
+  const shouldAttachScreenshot =
+    isFirstTurn && Boolean(attachedScreenshot) && !screenshotSentInConversation;
 
-  console.log(
-    `[LLM] Starting request (mode=${mode}, transcript=${context.length} chars` +
-      (screenshot ? `, image=${screenshot.sizeKb} KB ${screenshot.width}x${screenshot.height})` : ')')
-  );
-  sendToRenderer('llm:start', { context, includeScreenshot });
+  const recentTranscript = isFirstTurn ? buildTranscriptContext() : '';
+  const userPrompt =
+    isFirstTurn && recentTranscript
+      ? `Recent transcript (last ~2 minutes):\n${recentTranscript}\n\nUser request: ${text}`
+      : text;
 
-  try {
-    let receivedAnyChunk = false;
-    let firstTokenMs = null;
-
-    for await (const chunk of streamResponse(prompt, {
-      signal: controller.signal,
-      systemInstruction,
-      image: screenshot
-        ? { mimeType: screenshot.mimeType, data: screenshot.buffer }
-        : undefined,
-    })) {
-      if (requestId !== activeRequestId || controller.signal.aborted) {
-        return;
-      }
-      if (!receivedAnyChunk) {
-        firstTokenMs = Date.now() - requestStartMs;
-      }
-      receivedAnyChunk = true;
-      sendToRenderer('llm:chunk', chunk);
-    }
-
-    if (requestId !== activeRequestId || controller.signal.aborted) {
-      return;
-    }
-
-    if (!receivedAnyChunk) {
-      sendToRenderer('llm:error', 'The model returned an empty response. Try again.');
-      return;
-    }
-
-    const totalMs = Date.now() - requestStartMs;
-    console.log(
-      `[LLM] Completed request (mode=${mode}, ttft=${firstTokenMs}ms, total=${totalMs}ms)`
-    );
-    sendToRenderer('llm:end');
-  } catch (error) {
-    if (requestId !== activeRequestId || controller.signal.aborted) {
-      return;
-    }
-    const totalMs = Date.now() - requestStartMs;
-    const message = error && error.message ? error.message : 'Unexpected error calling LLM.';
-    console.error(`[LLM] Request failed (mode=${mode}, elapsed=${totalMs}ms):`, message);
-    sendToRenderer('llm:error', message);
-  } finally {
-    if (currentAbortController === controller) {
-      currentAbortController = null;
-    }
-  }
+  await executeConversationTurn({
+    reset: false,
+    userPrompt,
+    displayLabel: shouldAttachScreenshot ? `${text} (+img)` : text,
+    imageToSend: shouldAttachScreenshot ? attachedScreenshot : null,
+    modeLabel: isFirstTurn
+      ? shouldAttachScreenshot
+        ? 'typed-turn1+vision'
+        : 'typed-turn1'
+      : 'followup',
+  });
 }
 
 function registerShortcuts() {
@@ -728,11 +950,24 @@ function configureMediaPermissions() {
 
 ipcMain.on('overlay:ask', () => runContextPrompt({ includeScreenshot: false }));
 ipcMain.on('overlay:ask-with-screenshot', () => runContextPrompt({ includeScreenshot: true }));
+ipcMain.on('overlay:followup', (_event, text) => runFollowUpPrompt(text));
+ipcMain.on('overlay:clear-chat', () => resetConversation());
 ipcMain.on('overlay:hide', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.hide();
   }
 });
+
+ipcMain.handle('clipboard:write', (_event, text) => {
+  if (typeof text === 'string') {
+    clipboard.writeText(text);
+    return true;
+  }
+  return false;
+});
+
+ipcMain.handle('config:get', () => appConfig);
+ipcMain.handle('config:set', (_event, patch) => updateConfig(patch || {}));
 
 ipcMain.on('screenshot:capture', () => capturePrimaryScreenScreenshot());
 ipcMain.on('screenshot:clear', () => clearScreenshot());

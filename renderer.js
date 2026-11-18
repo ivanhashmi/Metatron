@@ -2,24 +2,35 @@ const statusDot = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
 const listenPill = document.getElementById('listen-pill');
 const listenLabel = document.getElementById('listen-label');
-const responseEl = document.getElementById('response');
-const responseScroll = document.getElementById('response-scroll');
-const transcriptList = document.getElementById('transcript-list');
-const transcriptScroll = document.getElementById('transcript-scroll');
-const errorBox = document.getElementById('error-box');
+const modeBtn = document.getElementById('mode-btn');
+const langSelect = document.getElementById('lang-select');
 const snapBtn = document.getElementById('snap-btn');
-const askBtn = document.getElementById('ask-btn');
 const hideBtn = document.getElementById('hide-btn');
+const errorBox = document.getElementById('error-box');
 const screenshotBar = document.getElementById('screenshot-bar');
 const screenshotThumb = document.getElementById('screenshot-thumb');
+const screenshotTitle = document.getElementById('screenshot-title');
 const screenshotMeta = document.getElementById('screenshot-meta');
 const sendScreenshotBtn = document.getElementById('send-screenshot-btn');
 const clearScreenshotBtn = document.getElementById('clear-screenshot-btn');
+const chatSectionLabel = document.getElementById('chat-section-label');
+const clearChatBtn = document.getElementById('clear-chat-btn');
+const chatScroll = document.getElementById('chat-scroll');
+const chatThread = document.getElementById('chat-thread');
+const transcriptList = document.getElementById('transcript-list');
+const transcriptScroll = document.getElementById('transcript-scroll');
+const followupForm = document.getElementById('followup-form');
+const followupInput = document.getElementById('followup-input');
 
 const captures = {
   me: null,
   them: null,
 };
+
+let currentConfig = { language: 'cpp', mode: 'coding' };
+let activeAssistantEl = null;
+let activeAssistantBodyEl = null;
+let activeAssistantRawText = '';
 
 function hasActiveCapture() {
   return Boolean(captures.me || captures.them);
@@ -28,6 +39,30 @@ function hasActiveCapture() {
 function setStatus(state, label) {
   statusDot.className = 'status-dot' + (state ? ` ${state}` : '');
   statusText.textContent = label;
+}
+
+function applyConfigUI(cfg) {
+  if (!cfg) return;
+  currentConfig = { ...currentConfig, ...cfg };
+
+  const isCoding = currentConfig.mode === 'coding';
+  modeBtn.textContent = isCoding ? 'Coding' : 'Meeting';
+  modeBtn.className = 'mode-btn' + (isCoding ? '' : ' meeting');
+  chatSectionLabel.textContent = isCoding
+    ? `Coding Assistant (${currentConfig.language})`
+    : 'Meeting Assistant';
+
+  // Ensure custom languages edited directly in config.json still show in the selector.
+  const hasOption = Array.from(langSelect.options).some(
+    (opt) => opt.value === currentConfig.language
+  );
+  if (!hasOption && currentConfig.language) {
+    const opt = document.createElement('option');
+    opt.value = currentConfig.language;
+    opt.textContent = currentConfig.language;
+    langSelect.appendChild(opt);
+  }
+  langSelect.value = currentConfig.language;
 }
 
 function setListeningIndicator(status) {
@@ -59,6 +94,9 @@ function renderScreenshot(summary) {
   }
 
   screenshotThumb.src = summary.thumbnailDataUrl;
+  screenshotTitle.textContent = summary.sentInConversation
+    ? 'Screenshot sent on Turn 1 (not re-sent on follow-ups)'
+    : 'Screenshot attached';
   screenshotMeta.textContent = `${summary.width}×${summary.height} · ${summary.sizeKb} KB · ${summary.time}`;
   screenshotBar.classList.add('visible');
 }
@@ -73,8 +111,164 @@ function clearError() {
   errorBox.classList.remove('visible');
 }
 
+function isNearBottom(el) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+}
+
 function scrollToBottom(el) {
   el.scrollTop = el.scrollHeight;
+}
+
+function clearChatPlaceholder() {
+  const placeholder = chatThread.querySelector('.chat-empty');
+  if (placeholder) placeholder.remove();
+}
+
+function showEmptyChatPlaceholder() {
+  chatThread.textContent = '';
+  const empty = document.createElement('div');
+  empty.className = 'chat-empty';
+  empty.textContent =
+    '⌘⇧S snap screen · ⌘⇧↩ solve with screenshot · ⌘↩ ask transcript · type below for follow-ups.';
+  chatThread.appendChild(empty);
+  activeAssistantEl = null;
+  activeAssistantBodyEl = null;
+  activeAssistantRawText = '';
+}
+
+/**
+ * Render inline markdown (**bold** and `code`) safely into DOM nodes.
+ */
+function appendInlineFormatted(container, text) {
+  const tokenRegex = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = tokenRegex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      container.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+    }
+    const token = match[0];
+    if (token.startsWith('**') && token.endsWith('**')) {
+      const strong = document.createElement('strong');
+      strong.textContent = token.slice(2, -2);
+      container.appendChild(strong);
+    } else if (token.startsWith('`') && token.endsWith('`')) {
+      const code = document.createElement('code');
+      code.className = 'md-inline-code';
+      code.textContent = token.slice(1, -1);
+      container.appendChild(code);
+    }
+    lastIndex = tokenRegex.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    container.appendChild(document.createTextNode(text.slice(lastIndex)));
+  }
+}
+
+function buildCodeBlockElement(lang, codeText) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'code-block';
+
+  const header = document.createElement('div');
+  header.className = 'code-header';
+
+  const langSpan = document.createElement('span');
+  langSpan.className = 'code-lang';
+  langSpan.textContent = lang || 'code';
+
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'copy-btn';
+  copyBtn.textContent = 'Copy';
+  copyBtn.addEventListener('click', async () => {
+    try {
+      await window.metatron.copyText(codeText);
+      copyBtn.textContent = 'Copied!';
+      copyBtn.classList.add('copied');
+      setTimeout(() => {
+        copyBtn.textContent = 'Copy';
+        copyBtn.classList.remove('copied');
+      }, 1500);
+    } catch {
+      copyBtn.textContent = 'Failed';
+    }
+  });
+
+  header.appendChild(langSpan);
+  header.appendChild(copyBtn);
+
+  const pre = document.createElement('pre');
+  pre.className = 'code-pre';
+  const code = document.createElement('code');
+  code.textContent = codeText;
+  pre.appendChild(code);
+
+  wrapper.appendChild(header);
+  wrapper.appendChild(pre);
+  return wrapper;
+}
+
+/**
+ * Parse assistant markdown into text blocks and monospace fenced code blocks
+ * (works cleanly even when a fence is still open mid-stream).
+ */
+function renderMarkdownInto(container, rawText) {
+  container.textContent = '';
+  if (!rawText) return;
+
+  const lines = rawText.split('\n');
+  let inCode = false;
+  let codeLang = '';
+  let codeLines = [];
+  let textLines = [];
+
+  const flushText = () => {
+    if (textLines.length === 0) return;
+    const content = textLines.join('\n').replace(/^\n+|\n+$/g, '');
+    textLines = [];
+    if (!content) return;
+
+    const p = document.createElement('div');
+    p.className = 'md-text';
+    appendInlineFormatted(p, content);
+    container.appendChild(p);
+  };
+
+  const flushCode = () => {
+    const codeText = codeLines.join('\n');
+    codeLines = [];
+    container.appendChild(buildCodeBlockElement(codeLang, codeText));
+    codeLang = '';
+  };
+
+  for (const line of lines) {
+    const fenceMatch = line.match(/^```([a-zA-Z0-9_+#.-]*)\s*$/);
+    if (fenceMatch) {
+      if (!inCode) {
+        flushText();
+        inCode = true;
+        codeLang = fenceMatch[1] || '';
+      } else {
+        flushCode();
+        inCode = false;
+      }
+      continue;
+    }
+
+    if (inCode) {
+      codeLines.push(line);
+    } else {
+      textLines.push(line);
+    }
+  }
+
+  if (inCode) {
+    flushCode();
+  } else {
+    flushText();
+  }
 }
 
 function createTranscriptRow(item, isInterim) {
@@ -286,12 +480,17 @@ async function handleSttControl({ action, sources = ['me', 'them'] }) {
   }
 }
 
-snapBtn.addEventListener('click', () => {
-  window.metatron.captureScreenshot();
+modeBtn.addEventListener('click', () => {
+  const nextMode = currentConfig.mode === 'coding' ? 'meeting' : 'coding';
+  window.metatron.setConfig({ mode: nextMode });
 });
 
-askBtn.addEventListener('click', () => {
-  window.metatron.ask();
+langSelect.addEventListener('change', () => {
+  window.metatron.setConfig({ language: langSelect.value });
+});
+
+snapBtn.addEventListener('click', () => {
+  window.metatron.captureScreenshot();
 });
 
 hideBtn.addEventListener('click', () => {
@@ -309,6 +508,21 @@ sendScreenshotBtn.addEventListener('click', () => {
 clearScreenshotBtn.addEventListener('click', () => {
   window.metatron.clearScreenshot();
 });
+
+clearChatBtn.addEventListener('click', () => {
+  window.metatron.clearChat();
+});
+
+followupForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const text = followupInput.value.trim();
+  if (!text) return;
+  followupInput.value = '';
+  window.metatron.sendFollowUp(text);
+});
+
+window.metatron.getConfig().then(applyConfigUI);
+window.metatron.onConfigUpdate(applyConfigUI);
 
 window.metatron.getSttState().then((state) => {
   setListeningIndicator(state.status);
@@ -339,36 +553,79 @@ window.metatron.onScreenshotUpdate((summary) => {
   renderScreenshot(summary);
 });
 
+window.metatron.onChatReset(() => {
+  clearError();
+  setStatus('', 'Ready');
+  showEmptyChatPlaceholder();
+});
+
 window.metatron.onSttError((message) => {
   showError(message);
   setStatus('error', 'Warning');
 });
 
-window.metatron.onStreamStart(({ includeScreenshot } = {}) => {
+window.metatron.onStreamStart(({ reset, userLabel, includeScreenshot } = {}) => {
   clearError();
-  responseEl.textContent = '';
-  responseEl.classList.remove('empty');
-  responseEl.classList.add('streaming');
+  if (reset) {
+    chatThread.textContent = '';
+  } else {
+    clearChatPlaceholder();
+  }
+
+  if (activeAssistantEl) {
+    activeAssistantEl.classList.remove('streaming');
+  }
+
+  if (userLabel) {
+    const userMsg = document.createElement('div');
+    userMsg.className = 'chat-msg user';
+    userMsg.textContent = userLabel;
+    chatThread.appendChild(userMsg);
+  }
+
+  const assistantMsg = document.createElement('div');
+  assistantMsg.className = 'chat-msg assistant streaming';
+
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'assistant-body';
+  assistantMsg.appendChild(bodyEl);
+  chatThread.appendChild(assistantMsg);
+
+  activeAssistantEl = assistantMsg;
+  activeAssistantBodyEl = bodyEl;
+  activeAssistantRawText = '';
+
   setStatus('streaming', includeScreenshot ? 'Streaming (+img)…' : 'Streaming…');
-  scrollToBottom(responseScroll);
+  scrollToBottom(chatScroll);
 });
 
 window.metatron.onStreamChunk((chunk) => {
-  responseEl.textContent += chunk;
-  scrollToBottom(responseScroll);
+  if (!activeAssistantBodyEl) return;
+  const shouldAutoScroll = isNearBottom(chatScroll);
+  activeAssistantRawText += chunk;
+  renderMarkdownInto(activeAssistantBodyEl, activeAssistantRawText);
+  if (shouldAutoScroll) {
+    scrollToBottom(chatScroll);
+  }
 });
 
 window.metatron.onStreamEnd(() => {
-  responseEl.classList.remove('streaming');
+  if (activeAssistantEl) {
+    activeAssistantEl.classList.remove('streaming');
+  }
+  activeAssistantEl = null;
+  activeAssistantBodyEl = null;
   setStatus('', 'Ready');
-  scrollToBottom(responseScroll);
 });
 
 window.metatron.onStreamError((message) => {
-  responseEl.classList.remove('streaming');
-  if (!responseEl.textContent.trim()) {
-    responseEl.classList.add('empty');
-    responseEl.textContent = 'Press ⌘↩ (transcript) or ⌘⇧↩ (with screenshot) to try again.';
+  if (activeAssistantEl) {
+    activeAssistantEl.classList.remove('streaming');
+    if (!activeAssistantRawText.trim()) {
+      activeAssistantEl.remove();
+    }
+    activeAssistantEl = null;
+    activeAssistantBodyEl = null;
   }
   showError(message);
   setStatus('error', 'Error');
