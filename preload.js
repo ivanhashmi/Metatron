@@ -7,11 +7,18 @@ function subscribe(channel, callback) {
 }
 
 contextBridge.exposeInMainWorld('metatron', {
-  getContext: () => ipcRenderer.invoke('overlay:get-context'),
   ask: () => ipcRenderer.send('overlay:ask'),
   hide: () => ipcRenderer.send('overlay:hide'),
+  toggleListening: () => ipcRenderer.send('stt:toggle'),
+  sendAudioChunk: (pcmBytes, rms) => ipcRenderer.send('stt:audio-chunk', pcmBytes, rms),
+  reportMicError: (message) => ipcRenderer.send('stt:mic-error', message),
+  getSttState: () => ipcRenderer.invoke('stt:get-state'),
   onStreamStart: (callback) => subscribe('llm:start', callback),
   onStreamChunk: (callback) => subscribe('llm:chunk', callback),
   onStreamEnd: (callback) => subscribe('llm:end', callback),
   onStreamError: (callback) => subscribe('llm:error', callback),
+  onSttControl: (callback) => subscribe('stt:control', callback),
+  onSttStatus: (callback) => subscribe('stt:status', callback),
+  onTranscriptUpdate: (callback) => subscribe('stt:transcript', callback),
+  onSttError: (callback) => subscribe('stt:error', callback),
 });

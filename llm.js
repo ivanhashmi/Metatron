@@ -3,7 +3,7 @@ const { GoogleGenAI } = require('@google/genai');
 const DEFAULT_GEMINI_MODELS = ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-2.5-flash'];
 const TRANSIENT_RETRY_DELAY_MS = 600;
 const SYSTEM_INSTRUCTION =
-  'You are Metatron, a concise real-time meeting assistant. Respond briefly and directly so the user can glance at your answer during a live meeting.';
+  'You are a discreet meeting assistant. Suggest what I should say next, in one or two sentences.';
 
 function extractReadableMessage(error) {
   let msg = error && error.message ? String(error.message) : String(error || 'Unknown error');
@@ -99,7 +99,7 @@ function getCandidateModels() {
 const geminiProvider = {
   name: 'gemini',
 
-  async *stream(prompt, { signal } = {}) {
+  async *stream(prompt, { signal, systemInstruction } = {}) {
     const apiKey = (process.env.GEMINI_API_KEY || '').trim();
     if (!apiKey || apiKey === 'your_gemini_api_key_here') {
       throw new Error(
@@ -109,6 +109,7 @@ const geminiProvider = {
 
     const ai = new GoogleGenAI({ apiKey });
     const models = getCandidateModels();
+    const instruction = systemInstruction || SYSTEM_INSTRUCTION;
     let lastError = null;
 
     for (const model of models) {
@@ -122,7 +123,7 @@ const geminiProvider = {
             model,
             contents: prompt,
             config: {
-              systemInstruction: SYSTEM_INSTRUCTION,
+              systemInstruction: instruction,
               abortSignal: signal,
             },
           });
